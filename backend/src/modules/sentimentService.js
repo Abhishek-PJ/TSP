@@ -7,7 +7,7 @@ const vader = require('vader-sentiment');
 
 export function scoreArticle(article) {
   const text = [article?.title, article?.summary].filter(Boolean).join('. ');
-  console.log(text);
+  // console.log(text);
   const { compound } = vader.SentimentIntensityAnalyzer.polarity_scores(text || '');
   return { compound };
 }
