@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
+import fetch from 'node-fetch';
 import { getSnapshot, getPreviousSessionSnapshot } from './modules/marketFeed.js';
 import { primaryFilter } from './modules/filters.js';
 import { getNewsForSymbol } from './modules/newsFetcher.js';
@@ -172,6 +173,60 @@ app.get('/api/picks/today', async (req, res) => {
   } catch (err) {
     console.error('picks error', err);
     res.status(500).json({ error: 'picks_failed' });
+  }
+});
+
+// OHLC endpoint for candlestick charts
+// Returns: { symbol, candles: [{ time, open, high, low, close, volume }] }
+app.get('/api/ohlc/:symbol', async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    if (!symbol) return res.status(400).json({ error: 'symbol_required' });
+    const ysym = `${symbol}.NS`;
+    const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ysym)}`);
+    // Reasonable defaults for a modal chart
+    const interval = String(req.query.interval || '1d'); // 1m, 5m, 15m, 1h, 1d
+    const range = String(req.query.range || '6mo'); // 1d,5d,1mo,3mo,6mo,1y,5y
+    url.searchParams.set('interval', interval);
+    url.searchParams.set('range', range);
+    url.searchParams.set('includePrePost', 'false');
+
+    const resp = await fetch(url.toString(), {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+      },
+    });
+    if (!resp.ok) {
+      return res.status(502).json({ error: 'upstream_failed', status: resp.status });
+    }
+    const data = await resp.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) return res.status(404).json({ error: 'no_data' });
+    const ts = Array.isArray(result.timestamp) ? result.timestamp : [];
+    const quote = result.indicators?.quote?.[0] || {};
+    const opens = Array.isArray(quote.open) ? quote.open : [];
+    const highs = Array.isArray(quote.high) ? quote.high : [];
+    const lows = Array.isArray(quote.low) ? quote.low : [];
+    const closes = Array.isArray(quote.close) ? quote.close : [];
+    const volumes = Array.isArray(quote.volume) ? quote.volume : [];
+
+    const candles = [];
+    for (let i = 0; i < ts.length; i++) {
+      const o = Number(opens[i]);
+      const h = Number(highs[i]);
+      const l = Number(lows[i]);
+      const c = Number(closes[i]);
+      const v = Number(volumes[i]);
+      if ([o, h, l, c].every((v) => isFinite(v))) {
+        candles.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: isFinite(v) ? v : 0 });
+      }
+    }
+    res.json({ symbol, interval, range, candles });
+  } catch (err) {
+    console.error('ohlc error', err);
+    res.status(500).json({ error: 'ohlc_failed' });
   }
 });
 

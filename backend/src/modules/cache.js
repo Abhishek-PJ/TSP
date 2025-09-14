@@ -2,7 +2,7 @@
 import Redis from 'ioredis';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load .env variables
+dotenv.config(); 
 
 const memStore = new Map();
 let redis = null;
