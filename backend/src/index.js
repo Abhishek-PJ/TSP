@@ -96,13 +96,22 @@ app.get('/api/news/:symbol', async (req, res) => {
   try {
     const { symbol } = req.params;
     const cacheKey = `news:${symbol}`;
+    const istNow = nowInIST();
+    const marketOpen = isMarketOpenIST(istNow);
+
     const cached = await getCached(cacheKey);
-    if (cached) return res.json({ source: 'cache', symbol, articles: cached });
+    if (!marketOpen) {
+      // Market closed: return cached news if available; do not fetch externally
+      if (cached) return res.json({ source: 'cache', symbol, articles: cached, marketOpen: false });
+      return res.json({ source: 'closed', symbol, articles: [], marketOpen: false });
+    }
+
+    if (cached) return res.json({ source: 'cache', symbol, articles: cached, marketOpen: true });
 
     const articles = await getNewsForSymbol(symbol);
-    // cache for 10 minutes
+    // cache for 10 minutes during market hours
     await setCached(cacheKey, articles, 10 * 60 * 1000);
-    res.json({ source: 'live', symbol, articles });
+    res.json({ source: 'live', symbol, articles, marketOpen: true });
   } catch (err) {
     console.error('news error', err);
     res.status(500).json({ error: 'news_failed' });
@@ -146,17 +155,13 @@ app.get('/api/picks/today', async (req, res) => {
       return;
     }
 
-    // Build from previous session snapshot
+    // Build from previous session snapshot without live news fetching
     const prev = await getPreviousSessionSnapshot();
     const candidates = prev.filter(primaryFilter);
     const results = await Promise.all(
       candidates.map(async (row) => {
         const cacheKey = `news:${row.symbol}`;
-        let articles = await getCached(cacheKey);
-        if (!articles) {
-          articles = await getNewsForSymbol(row.symbol);
-          await setCached(cacheKey, articles, 10 * 60 * 1000);
-        }
+        const articles = await getCached(cacheKey) || [];
         const sentiment = aggregateSentiment(articles);
         const rec = buildRecommendation(row, sentiment);
         return { ...row, sentiment, recommendation: rec, topHeadline: articles[0]?.title || null };
