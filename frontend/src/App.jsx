@@ -227,7 +227,7 @@ function App() {
                   <div className="grid gap-4 p-4">
                     {/* Bullish Table */}
                     <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-slate-200 border-l-4 border-emerald-500 px-6 py-4 pl-5 flex items-center justify-between">
+                      <div className="bg-white border-b border-l-4 border-emerald-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Bullish</div>
                           <div className="text-xs tracking-wide text-slate-600">Strong positive sentiment and metrics</div>
@@ -274,7 +274,7 @@ function App() {
 
                     {/* Watch Table */}
                     <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-slate-200 border-l-4 border-amber-500 px-6 py-4 pl-5 flex items-center justify-between">
+                      <div className="bg-white border-b border-l-4 border-amber-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Watch</div>
                           <div className="text-xs tracking-wide text-slate-600">Meets some criteria; monitor closely</div>
@@ -321,7 +321,7 @@ function App() {
 
                     {/* Skip Table */}
                     <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-slate-200 border-l-4 border-rose-500 px-6 py-4 pl-5 flex items-center justify-between">
+                      <div className="bg-white border-b border-l-4 border-rose-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Skip</div>
                           <div className="text-xs tracking-wide text-slate-600">Fails numeric/sentiment checks</div>
