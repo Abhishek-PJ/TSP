@@ -23,3 +23,5 @@ body {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
 }
+
+/* Compact table density removed per latest request */

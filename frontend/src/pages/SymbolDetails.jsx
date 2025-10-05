@@ -9,6 +9,50 @@ export default function SymbolDetails() {
   const [error, setError] = useState('');
   const [articles, setArticles] = useState([]);
 
+  // Helper: dd-mm-yyyy
+  function formatDateDMY(v) {
+    if (!v) return '';
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      const [y, m, d] = v.split('-');
+      return `${d}-${m}-${y}`;
+    }
+    const d = new Date(v);
+    if (isNaN(d)) return String(v);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${dd}-${mm}-${yyyy}`;
+  }
+
+  // Helper: dd-mm-yyyy hh:mm (24h)
+  function formatDateTimeDMY(v) {
+    if (!v) return '';
+    const d = new Date(v);
+    if (isNaN(d)) return String(v);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}-${mm}-${yyyy} ${hh}:${min}`;
+  }
+
+  // Helper: dd-mm-yyyy hh:mm am/pm (12h)
+  function formatDateTimeDMY12(v) {
+    if (!v) return '';
+    const d = new Date(v);
+    if (isNaN(d)) return String(v);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    let h = d.getHours();
+    const suffix = h >= 12 ? 'pm' : 'am';
+    h = h % 12; if (h === 0) h = 12;
+    const hh = String(h).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}-${mm}-${yyyy} ${hh}:${min} ${suffix}`;
+  }
+
   async function fetchNews() {
     try {
       setLoading(true);
@@ -73,7 +117,7 @@ export default function SymbolDetails() {
               rel="noreferrer"
               className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-6 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
             >
-              <div className="text-[11px] text-slate-500 dark:text-slate-400">{new Date(a.publishedAt).toLocaleString()}</div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">{formatDateTimeDMY12(a.publishedAt)}</div>
               <div className="mt-1 font-bold text-slate-900 dark:text-white">{a.title}</div>
               {a.summary && <div className="mt-1 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{a.summary}</div>}
             </a>

@@ -8,7 +8,8 @@ import { primaryFilter } from './modules/filters.js';
 import { getNewsForSymbol } from './modules/newsFetcher.js';
 import { aggregateSentiment } from './modules/sentimentService.js';
 import { getCached, setCached, isRedisEnabled } from './modules/cache.js';
-import { buildRecommendation } from './modules/recommendationEngine.js';
+import { buildRecommendation, buildEnhancedRecommendations } from './modules/recommendationEngine.js';
+import { checkAgnoHealth, getAgnoMetrics } from './modules/agnoClient.js';
 
 dotenv.config();
 
@@ -55,13 +56,21 @@ async function refreshSnapshot() {
   }
 }
 
-// Schedule snapshot refresh every 30 seconds during market hours (every minute of every day for demo)
+// Schedule snapshot refresh every 30 seconds during market hours 
 cron.schedule('*/30 * * * * *', async () => {
   await refreshSnapshot();
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), redis: isRedisEnabled() });
+app.get('/health', async (req, res) => {
+  const agnoHealth = await checkAgnoHealth();
+  const agnoMetrics = getAgnoMetrics();
+  res.json({ 
+    status: 'ok', 
+    time: new Date().toISOString(), 
+    redis: isRedisEnabled(),
+    agno: agnoHealth,
+    agnoMetrics,
+  });
 });
 
 app.get('/api/snapshot', async (req, res) => {
@@ -131,7 +140,10 @@ app.get('/api/picks/today', async (req, res) => {
         lastSnapshot = { at: nowMs, data };
       }
       const candidates = lastSnapshot.data.filter(primaryFilter);
-      const results = await Promise.all(
+      
+      // Build news map for all candidates
+      const newsMap = {};
+      await Promise.all(
         candidates.map(async (row) => {
           const cacheKey = `news:${row.symbol}`;
           let articles = await getCached(cacheKey);
@@ -139,14 +151,22 @@ app.get('/api/picks/today', async (req, res) => {
             articles = await getNewsForSymbol(row.symbol);
             await setCached(cacheKey, articles, 10 * 60 * 1000);
           }
-          const sentiment = aggregateSentiment(articles);
-          const rec = buildRecommendation(row, sentiment);
-          return { ...row, sentiment, recommendation: rec, topHeadline: articles[0]?.title || null };
+          newsMap[row.symbol] = articles;
         })
       );
+
+      // Use enhanced recommendations with Agno + fallback
+      const results = await buildEnhancedRecommendations(candidates, newsMap);
+      
+      // Add top headline to each result
+      const resultsWithHeadlines = results.map(row => ({
+        ...row,
+        topHeadline: newsMap[row.symbol]?.[0]?.title || null,
+      }));
+
       // Update lastSessionPicks cache continuously during market to have fresh at close
-      lastSessionPicks = { sessionDate: formatYMD(istNow), results, asOf: new Date(nowMs).toISOString() };
-      res.json({ asOf: new Date(nowMs).toISOString(), marketOpen: true, count: results.length, results });
+      lastSessionPicks = { sessionDate: formatYMD(istNow), results: resultsWithHeadlines, asOf: new Date(nowMs).toISOString() };
+      res.json({ asOf: new Date(nowMs).toISOString(), marketOpen: true, count: resultsWithHeadlines.length, results: resultsWithHeadlines });
       return;
     }
 
@@ -159,17 +179,27 @@ app.get('/api/picks/today', async (req, res) => {
     // Build from previous session snapshot without live news fetching
     const prev = await getPreviousSessionSnapshot();
     const candidates = prev.filter(primaryFilter);
-    const results = await Promise.all(
+    
+    // Build news map from cache
+    const newsMap = {};
+    await Promise.all(
       candidates.map(async (row) => {
         const cacheKey = `news:${row.symbol}`;
-        const articles = await getCached(cacheKey) || [];
-        const sentiment = aggregateSentiment(articles);
-        const rec = buildRecommendation(row, sentiment);
-        return { ...row, sentiment, recommendation: rec, topHeadline: articles[0]?.title || null };
+        newsMap[row.symbol] = await getCached(cacheKey) || [];
       })
     );
-    lastSessionPicks = { sessionDate: formatYMD(istNow), results, asOf: new Date(nowMs).toISOString() };
-    res.json({ asOf: lastSessionPicks.asOf, marketOpen: false, sessionDate: lastSessionPicks.sessionDate, count: results.length, results });
+
+    // Use enhanced recommendations (will fallback to VADER since no live Agno call needed)
+    const results = await buildEnhancedRecommendations(candidates, newsMap);
+    
+    // Add top headline to each result
+    const resultsWithHeadlines = results.map(row => ({
+      ...row,
+      topHeadline: newsMap[row.symbol]?.[0]?.title || null,
+    }));
+
+    lastSessionPicks = { sessionDate: formatYMD(istNow), results: resultsWithHeadlines, asOf: new Date(nowMs).toISOString() };
+    res.json({ asOf: lastSessionPicks.asOf, marketOpen: false, sessionDate: lastSessionPicks.sessionDate, count: resultsWithHeadlines.length, results: resultsWithHeadlines });
   } catch (err) {
     console.error('picks error', err);
     res.status(500).json({ error: 'picks_failed' });
