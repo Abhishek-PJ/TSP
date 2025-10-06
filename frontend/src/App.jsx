@@ -202,7 +202,7 @@ function App() {
                 className={`border-t border-slate-200 transition-colors border-l-4 ${row.original.symbol === chartSymbol ? `${highlight} ${borderColor}` : `border-transparent ${hoverBg}`}`}
               >
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} className="px-4 py-3">
+                  <td key={cell.id} className="px-4 py-3 text-slate-800">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}
@@ -237,9 +237,8 @@ function App() {
 
   useEffect(() => {
     fetchPicks();
-    const id = setInterval(fetchPicks, 30_000);
+    const id = setInterval(fetchPicks, 300_000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Load health status
@@ -326,7 +325,7 @@ function App() {
   }
 
   return (
-    <div className="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+    <div className="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen">
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm">
         <div className="w-full px-6 lg:px-10 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -338,6 +337,7 @@ function App() {
             <div>
               <div className="text-xl font-extrabold tracking-tight text-slate-900">Trendy Stocks Predictor </div>
               <div className="text-sm text-slate-600">AI-Powered Trend Prediction Platform</div>
+              
             </div>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
@@ -363,6 +363,7 @@ function App() {
           <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 mb-4">
             Market Closed — Showing last session's picks{sessionDate ? ` (${formatDateDMY(sessionDate)})` : ''}.
           </div>
+          
         )}
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-4 mb-4">{error}</div>
@@ -438,7 +439,12 @@ function App() {
                 {!loading && sorted.length > 0 && (
                   <div className="grid gap-4 p-4">
                     {/* Column visibility toggles */}
-                    <div className="flex flex-wrap items-center gap-4 text-sm text-slate-700">
+                    <motion.div 
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3 }}
+                      className="flex flex-wrap items-center gap-4 text-sm text-slate-700"
+                    >
                       <span className="text-xs font-semibold text-slate-600">Columns:</span>
                       {[
                         { key: 'symbol', label: 'Symbol' },
@@ -457,11 +463,16 @@ function App() {
                           <span>{c.label}</span>
                         </label>
                       ))}
-                    </div>
+                    </motion.div>
 
                     {/* Bullish Table */}
                     {showBull && (
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: 0.1 }}
+                      className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                    >
                       <div className="bg-white border-b border-l-4 border-emerald-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Bullish</div>
@@ -477,12 +488,17 @@ function App() {
                           borderColor="border-emerald-500"
                         />
                       </div>
-                    </div>
+                    </motion.div>
                     )}
 
                     {/* Watch Table */}
                     {showWatch && (
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: showBull ? 0.5 : 0.1 }}
+                      className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                    >
                       <div className="bg-white border-b border-l-4 border-amber-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Watch</div>
@@ -498,12 +514,17 @@ function App() {
                           borderColor="border-amber-500"
                         />
                       </div>
-                    </div>
+                    </motion.div>
                     )}
 
                     {/* Skip Table */}
                     {showSkip && (
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, delay: (showBull && showWatch) ? 0.9 : (showBull || showWatch) ? 0.5 : 0.1 }}
+                      className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                    >
                       <div className="bg-white border-b border-l-4 border-rose-500 px-6 py-4 pl-5 flex items-center justify-between">
                         <div>
                           <div className="text-lg font-bold text-slate-900">Skip</div>
@@ -519,7 +540,7 @@ function App() {
                           borderColor="border-rose-500"
                         />
                       </div>
-                    </div>
+                    </motion.div>
                     )}
                   </div>
                 )}
@@ -614,6 +635,8 @@ function App() {
             <span> {new Date().getFullYear()} Trendy Stocks Predictor</span>
             <a href="https://vitejs.dev" target="_blank" rel="noreferrer" className="text-blue-600 font-bold hover:text-blue-800"></a>
           </div>
+          
+
         </div>
       </footer>
     </div>

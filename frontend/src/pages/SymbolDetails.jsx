@@ -74,15 +74,15 @@ export default function SymbolDetails() {
   }, [symbol]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50 to-slate-100 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900">
-      <header className="sticky top-0 z-50 bg-white/90 dark:bg-slate-900/90 backdrop-blur border-b border-slate-200 dark:border-slate-700 shadow-sm">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50 to-slate-100">
+      <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm">
         <div className="w-full px-6 lg:px-10 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
-              <Link to="/" className="text-blue-600 dark:text-blue-400 font-bold hover:text-blue-800 dark:hover:text-blue-300">← Back</Link>
+              <Link to="/" className="text-blue-600 font-bold hover:text-blue-800">← Back</Link>
               <div>
-                <div className="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white">{symbol} — News (48h)</div>
-                <div className="text-sm text-slate-600 dark:text-slate-400">Latest headlines and summaries</div>
+                <div className="text-xl font-extrabold tracking-tight text-slate-900">{symbol} — News (48h)</div>
+                <div className="text-sm text-slate-600">Latest headlines and summaries</div>
               </div>
             </div>
             <button onClick={fetchNews} disabled={loading} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 font-bold text-sm text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.98] shadow-md disabled:opacity-60">
@@ -94,20 +94,20 @@ export default function SymbolDetails() {
 
       <main className="w-full px-6 lg:px-10 py-6">
         {error && (
-          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-300 rounded-xl p-4 mb-4">{error}</div>
+          <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-4 mb-4">{error}</div>
         )}
 
         {loading && (
           <div className="grid gap-4 mb-6">
             {[...Array(4)].map((_, i) => (
-              <div key={i} className="h-24 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 animate-pulse" />
+              <div key={i} className="h-24 rounded-xl border border-slate-200 bg-white/70 animate-pulse" />
             ))}
           </div>
         )}
 
         <div className="grid gap-4">
           {articles.length === 0 && !loading && (
-            <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-6 text-slate-600 dark:text-slate-400">No recent articles.</div>
+            <div className="rounded-xl border border-slate-200 bg-white p-6 text-slate-600">No recent articles.</div>
           )}
           {articles.map((a, idx) => (
             <a
@@ -115,11 +115,11 @@ export default function SymbolDetails() {
               href={a.url}
               target="_blank"
               rel="noreferrer"
-              className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-6 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+              className="rounded-xl border border-slate-200 bg-white p-6 text-slate-800 hover:bg-slate-50 transition-colors"
             >
-              <div className="text-[11px] text-slate-500 dark:text-slate-400">{formatDateTimeDMY12(a.publishedAt)}</div>
-              <div className="mt-1 font-bold text-slate-900 dark:text-white">{a.title}</div>
-              {a.summary && <div className="mt-1 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{a.summary}</div>}
+              <div className="text-[11px] text-slate-500">{formatDateTimeDMY12(a.publishedAt)}</div>
+              <div className="mt-1 font-bold text-slate-900">{a.title}</div>
+              {a.summary && <div className="mt-1 text-sm text-slate-700 leading-relaxed">{a.summary}</div>}
             </a>
           ))}
         </div>
