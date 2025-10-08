@@ -23,9 +23,6 @@ A full-stack app that surfaces intraday stock candidates using numeric filters a
 ```bash
 cd agent
 pip install -r requirements.txt
-cp .env.example .env
-# Edit .env and set GEMINI_API_KEY=your-key-here
-# Get free key at: https://aistudio.google.com/app/apikey
 uvicorn server:app --reload --port 8000
 ```
 
@@ -51,8 +48,6 @@ npm run dev
 ```bash
 cd backend
 npm install
-# Set AGNO_ENABLED=false in .env or:
-$env:AGNO_ENABLED="false"
 npm run dev
 ```
 
@@ -78,7 +73,6 @@ REDIS_URL=redis://localhost:6379/0
 ### Backend (`backend/.env`)
 ```env
 PORT=4000
-NEWSAPI_KEY=your_newsapi_key_here
 
 # Redis (optional)
 REDIS_URL=redis://localhost:6379
@@ -157,6 +151,41 @@ curl http://localhost:4000/api/picks/today
 
 ## Docker Deployment
 
+
+### Using Pre-built Images from Docker Hub
+
+You can run the project using pre-built images from Docker Hub instead of building locally. This is faster and doesn't require the source code.
+
+1. **Pull the images**:
+   ```bash
+   docker pull abhishekpj/tsp-agent:1.0.0
+   docker pull abhishekpj/tsp-backend:1.0.0
+   docker pull abhishekpj/tsp-frontend:1.0.0
+   ```
+
+2. **Start the services**:
+   ```bash
+   docker-compose up
+   ```
+
+   Services will be available at:
+   - Frontend: http://localhost:5173
+   - Backend: http://localhost:4000
+   - Agent: http://localhost:8000
+
+3. **Stop the services**:
+   ```bash
+   docker-compose down
+   ```
+
+   **Note**: Ensure you have a `.env` file in each service directory (`agent/.env`, `backend/.env`, `frontend/.env`) with the required environment variables (e.g., `GEMINI_API_KEY` for the agent). Copy from the `.env.example` files if needed.
+
+   **Docker Hub Repository**: [https://hub.docker.com/repositories/abhishekpj](https://hub.docker.com/repositories/abhishekpj)
+
+### Building Locally (Alternative)
+
+If you prefer to build the images yourself:
+
 ```bash
 # Start all services
 docker-compose up --build
@@ -168,40 +197,6 @@ docker-compose up --build
 
 # Stop services
 docker-compose down
-```
-
-## Project Structure
-```
-TSP/
-  agent/                        # NEW: Python Agno service
-    server.py                   # FastAPI + Agno agent
-    requirements.txt
-    .env.example
-    Dockerfile
-    README.md
-  backend/
-    src/
-      index.js                  # Main server (updated)
-      modules/
-        agnoClient.js           # NEW: Agent HTTP client
-        recommendationEngine.js # NEW: AI integration
-        sentimentService.js     # VADER fallback
-        newsFetcher.js
-        filters.js
-        marketFeed.js
-        cache.js
-    package.json
-    .env.example                # NEW: With Agno config
-    Dockerfile                  # NEW
-  frontend/
-    src/
-      App.jsx
-      components/
-      pages/
-    package.json
-  docker-compose.yml            # NEW: Full stack
-  test-agno-integration.ps1     # NEW: Test script
-  RUNBOOK.md                    # NEW: Detailed operations guide
 ```
 
 ## Libraries
@@ -254,10 +249,44 @@ pip install -r requirements.txt
 # Verify AGNO_ENABLED=true in backend/.env
 ```
 
-## Documentation
-- **README.md** (this file) - Quick start and overview
-- **RUNBOOK.md** - Detailed operations, testing, monitoring
-- **agent/README.md** - Agent service specifics
+## Project Structure
+```
+TSP/
+  agent/                        # Python Agno service
+    server.py                   # FastAPI app with Agno agent
+    requirements.txt            # Python dependencies
+    .env.example                # Environment template
+    Dockerfile                  # Container definition
+    README.md                   # Agent-specific docs
+  backend/
+    src/
+      index.js                  # Main server 
+      modules/
+        marketFeed.js           # NSE data feed
+        filters.js              # Numeric filters
+        newsFetcher.js          # Multi-source news
+        sentimentService.js     # VADER fallback
+        recommendationEngine.js # Agno integration
+        agnoClient.js           # Agno HTTP client
+        cache.js                # Redis cache
+    package.json
+    .env.example               
+    Dockerfile                  # Container definition
+  frontend/
+    src/
+      App.jsx
+      main.jsx
+      components/
+        Modal.jsx
+        CandlestickChart.jsx
+      pages/
+        SymbolDetails.jsx
+      index.css
+    vite.config.js
+    Dockerfile                  # Container definition
+    package.json
+  docker-compose.yml            # Full stack orchestration
+  test-agno-integration.ps1     # PowerShell test script
+  test-agno-integration.sh      # Bash test script
+```
 
-## License
-Private project for demonstration purposes.
