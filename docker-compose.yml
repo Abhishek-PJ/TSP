@@ -12,7 +12,6 @@ services:
   agent:
     build: ./agent
     image: abhishekpj/tsp-agent:1.0.0
-    env_file: ./agent/.env
     ports:
       - "8000:8000"
     depends_on:
@@ -29,8 +28,6 @@ services:
   backend:
     build: ./backend
     image: abhishekpj/tsp-backend:1.0.0
-
-    env_file: ./backend/.env
     ports:
       - "4000:4000"
     depends_on:
