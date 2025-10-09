@@ -1,13 +1,12 @@
-// Real news fetcher: NewsAPI (if key present) -> Google News RSS fallback
+// Real news fetcher: NewsAPI (if key present) -> RSS fallback
 // Returns last-48h articles for a symbol as {title, summary, url, publishedAt}
 
 import fetch from 'node-fetch';
 import { XMLParser } from 'fast-xml-parser';
 
 function buildQuery(symbol) {
-  // Convert symbol to company name if needed, or use as is
-  // For now, we'll just use the symbol as the query
-  return `"${symbol}" OR "${symbol}.NS"`;
+  // You can enhance this to map symbols to company names if you have a mapping.
+  return `"${symbol}" OR "${symbol}.NS" OR "NSE:${symbol}" OR "${symbol} stock" OR "${symbol} share"`;
 }
 
 const HORIZON_MS = 48 * 3600 * 1000;
@@ -15,13 +14,7 @@ const HORIZON_MS = 48 * 3600 * 1000;
 function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { ...options, signal: controller.signal })
-    .finally(() => clearTimeout(id));
-}
-
-function within48h(dateStr) {
-  const t = new Date(dateStr).getTime();
-  return Number.isFinite(t) && (Date.now() - t) <= HORIZON_MS;
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
 }
 
 function dedupeArticles(items) {
@@ -36,103 +29,253 @@ function dedupeArticles(items) {
   return out;
 }
 
+const stripTags = (html = '') => String(html).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+
+const toISO = (d) => {
+  const dt = d instanceof Date ? d : new Date(d);
+  return isNaN(dt) ? null : dt.toISOString();
+};
+
+function isFresh(iso) {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) && (Date.now() - t) <= HORIZON_MS && t <= Date.now();
+}
+
+function normalizeItem({ title, summary, url, publishedAt }) {
+  const cleanTitle = (title || '').trim();
+  const cleanSummary = stripTags(summary || '').slice(0, 400);
+  const iso = toISO(publishedAt);
+  return { title: cleanTitle, summary: cleanSummary, url, publishedAt: iso };
+}
+
+function sortByNewest(items) {
+  return [...items].sort((a, b) => (new Date(b.publishedAt) - new Date(a.publishedAt)));
+}
+
+/* =========================
+   NewsAPI (preferred)
+   ========================= */
 async function fetchNewsAPI(symbol) {
-  const apiKey = process.env.NEWSAPI_KEY;
-  if (!apiKey) return [];
-  const query = encodeURIComponent(buildQuery(symbol));
-  const url = `https://newsapi.org/v2/everything?q=${query}&language=en&sortBy=publishedAt&pageSize=20&apiKey=${apiKey}`;
-  const res = await fetchWithTimeout(url, undefined, 8000);
-  if (!res.ok) throw new Error(`NewsAPI HTTP ${res.status}`);
-  const data = await res.json();
-  const articles = (data.articles || []).map(a => ({
-    title: a.title || '',
-    summary: a.description || a.content || '',
-    url: a.url,
-    publishedAt: a.publishedAt || a.__publishedAt || new Date().toISOString(),
-  })).filter(a => a.url && within48h(a.publishedAt));
-  return dedupeArticles(articles);
+  const key = process.env.NEWSAPI_KEY || process.env.NEWS_API_KEY;
+  if (!key) return [];
+
+  const q = buildQuery(symbol);
+  const url = new URL('https://newsapi.org/v2/everything');
+  url.searchParams.set('q', q);
+  url.searchParams.set('language', 'en');
+  url.searchParams.set('sortBy', 'publishedAt');
+  url.searchParams.set('pageSize', '30');
+
+  const r = await fetchWithTimeout(url.toString(), {
+    headers: { 'X-Api-Key': key, 'Accept': 'application/json' },
+  }, 10000);
+
+  if (!r.ok) throw new Error(`NewsAPI HTTP ${r.status}`);
+  const data = await r.json();
+  const articles = Array.isArray(data?.articles) ? data.articles : [];
+
+  const mapped = articles.map((a) =>
+    normalizeItem({
+      title: a.title,
+      summary: a.description || a.content || '',
+      url: a.url,
+      publishedAt: a.publishedAt,
+    })
+  ).filter(a => a.title && a.url && isFresh(a.publishedAt));
+
+  return sortByNewest(dedupeArticles(mapped));
 }
 
-async function fetchGoogleNewsRSS(symbol) {
-  // Google News RSS query
-  const q = encodeURIComponent(buildQuery(symbol));
-  const url = `https://news.google.com/rss/search?q=${q}&hl=en-IN&gl=IN&ceid=IN:en`;
-  const res = await fetchWithTimeout(url, {
-    headers: {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
-      'accept-language': 'en-US,en;q=0.9',
-      'cache-control': 'no-cache',
-      'pragma': 'no-cache',
-    },
-  }, 8000);
-  if (!res.ok) throw new Error(`GoogleRSS HTTP ${res.status}`);
-  const xml = await res.text();
-  const parser = new XMLParser({ ignoreAttributes: false });
-  const parsed = parser.parse(xml);
-  const items = parsed?.rss?.channel?.item || [];
-  const articles = items.map(it => ({
-    title: it.title || '',
-    summary: (it.description || '').replace(/<[^>]+>/g, ''),
-    url: it.link,
-    publishedAt: it.pubDate ? new Date(it.pubDate).toISOString() : new Date().toISOString(),
-  })).filter(a => a.url && within48h(a.publishedAt));
-  return dedupeArticles(articles);
+/* =========================
+   RSS helpers
+   ========================= */
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',
+  textNodeName: 'text',
+  trimValues: true,
+});
+
+function parseRSS(xml) {
+  const obj = parser.parse(xml);
+  // Support both RSS and Atom-ish shapes
+  const channelItems = obj?.rss?.channel?.item;
+  const feedEntries = obj?.feed?.entry;
+  if (Array.isArray(channelItems)) return channelItems;
+  if (Array.isArray(feedEntries)) return feedEntries;
+  return [];
 }
 
-async function fetchBingNewsRSS(symbol) {
-  // Bing News RSS as secondary fallback
-  const q = encodeURIComponent(buildQuery(symbol));
-  const url = `https://www.bing.com/news/search?q=${q}&setlang=en-IN&format=rss`;
-  const res = await fetchWithTimeout(url, {
-    headers: {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
-      'accept-language': 'en-US,en;q=0.9',
-    },
-  }, 8000);
-  if (!res.ok) throw new Error(`BingRSS HTTP ${res.status}`);
-  const xml = await res.text();
-  const parser = new XMLParser({ ignoreAttributes: false });
-  const parsed = parser.parse(xml);
-  const items = parsed?.rss?.channel?.item || [];
-  const articles = items.map(it => ({
-    title: it.title || '',
-    summary: (it.description || '').replace(/<[^>]+>/g, ''),
-    url: it.link,
-    publishedAt: it.pubDate ? new Date(it.pubDate).toISOString() : new Date().toISOString(),
-  })).filter(a => a.url && within48h(a.publishedAt));
-  return dedupeArticles(articles);
-}
-
-export async function getNewsForSymbol(symbol) {
-  // Try NewsAPI first if key provided, else fall back to Google News RSS
-  try {
-    const primary = await fetchNewsAPI(symbol);
-    if (primary.length > 0) return primary;
-  } catch (e) {
-    console.warn(`[news] NewsAPI failed for ${symbol}, falling back to RSS:`, e.message || e);
-  }
-  try {
-    // Simple retry on Google RSS to handle transient DNS/edge failures
-    let lastErr;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const rss = await fetchGoogleNewsRSS(symbol);
-        return rss;
-      } catch (err) {
-        lastErr = err;
+function pickFirst(...vals) {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.trim()) return v;
+    if (typeof v === 'object') {
+      // handle arrays like [{...}] or strings inside arrays
+      if (Array.isArray(v) && v.length) {
+        const first = v[0];
+        if (typeof first === 'string') return first;
+        if (typeof first === 'object') {
+          // try common link shapes
+          if (first.href) return first.href;
+          if (first.link) return first.link;
+        }
       }
     }
-    throw lastErr || new Error('google_rss_failed');
+  }
+  return undefined;
+}
+
+/* =========================
+   Google News RSS
+   ========================= */
+async function fetchGoogleNewsRSS(symbol) {
+  const q = buildQuery(symbol);
+  const url = new URL('https://news.google.com/rss/search');
+  url.searchParams.set('q', q);
+  url.searchParams.set('hl', 'en-IN');
+  url.searchParams.set('gl', 'IN');
+  url.searchParams.set('ceid', 'IN:en');
+
+  const r = await fetchWithTimeout(url.toString(), { headers: { 'Accept': 'application/rss+xml, application/xml' } });
+  if (!r.ok) throw new Error(`Google News RSS HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = parseRSS(xml);
+
+  const mapped = items.map((it) => {
+    const title = it.title || it['media:title'] || '';
+    const url = pickFirst(it.link, it.guid, it?.source?.url) || '';
+    const publishedAt = it.pubDate || it.published || it.updated || '';
+    const summary = it.description || it.summary || '';
+    return normalizeItem({ title, summary, url, publishedAt });
+  }).filter(a => a.title && a.url && isFresh(a.publishedAt));
+
+  return sortByNewest(dedupeArticles(mapped));
+}
+
+/* =========================
+   Yahoo Finance RSS (per symbol)
+   ========================= */
+async function fetchYahooFinanceRSS(symbol) {
+  const ysym = `${symbol}.NS`;
+  const url = new URL('https://feeds.finance.yahoo.com/rss/2.0/headline');
+  url.searchParams.set('s', ysym);
+  url.searchParams.set('region', 'IN');
+  url.searchParams.set('lang', 'en-IN');
+
+  const r = await fetchWithTimeout(url.toString(), { headers: { 'Accept': 'application/rss+xml, application/xml' } });
+  if (!r.ok) throw new Error(`Yahoo Finance RSS HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = parseRSS(xml);
+
+  const mapped = items.map((it) => {
+    const title = it.title || '';
+    const url = pickFirst(it.link, it.guid) || '';
+    const publishedAt = it.pubDate || '';
+    const summary = it.description || '';
+    return normalizeItem({ title, summary, url, publishedAt });
+  }).filter(a => a.title && a.url && isFresh(a.publishedAt));
+
+  return sortByNewest(dedupeArticles(mapped));
+}
+
+/* =========================
+   Economic Times RSS (site-wide search feed)
+   ========================= */
+async function fetchEconomicTimesRSS(symbol) {
+  // ET RSS search is not officially documented; use Google News ET section as a fallback pattern if needed.
+  // Here we query site: URLs through Google News itself filtered to economictimes.com
+  const q = `${buildQuery(symbol)} site:economictimes.com`;
+  const url = new URL('https://news.google.com/rss/search');
+  url.searchParams.set('q', q);
+  url.searchParams.set('hl', 'en-IN');
+  url.searchParams.set('gl', 'IN');
+  url.searchParams.set('ceid', 'IN:en');
+
+  const r = await fetchWithTimeout(url.toString(), { headers: { 'Accept': 'application/rss+xml, application/xml' } });
+  if (!r.ok) throw new Error(`Economic Times RSS via Google News HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = parseRSS(xml);
+
+  const mapped = items.map((it) => {
+    const title = it.title || '';
+    const url = pickFirst(it.link, it.guid) || '';
+    const publishedAt = it.pubDate || '';
+    const summary = it.description || '';
+    return normalizeItem({ title, summary, url, publishedAt });
+  }).filter(a => a.title && a.url && isFresh(a.publishedAt) && /economictimes\.com/i.test(a.url));
+
+  return sortByNewest(dedupeArticles(mapped));
+}
+
+/* =========================
+   Bing News RSS
+   ========================= */
+async function fetchBingNewsRSS(symbol) {
+  const q = buildQuery(symbol);
+  const url = new URL('https://www.bing.com/news/search');
+  url.searchParams.set('q', q);
+  url.searchParams.set('format', 'rss');
+
+  const r = await fetchWithTimeout(url.toString(), { headers: { 'Accept': 'application/rss+xml, application/xml' } });
+  if (!r.ok) throw new Error(`Bing News RSS HTTP ${r.status}`);
+  const xml = await r.text();
+  const items = parseRSS(xml);
+
+  const mapped = items.map((it) => {
+    const title = it.title || '';
+    const url = pickFirst(it.link, it.guid) || '';
+    const publishedAt = it.pubDate || it.updated || '';
+    const summary = it.description || it.summary || '';
+    return normalizeItem({ title, summary, url, publishedAt });
+  }).filter(a => a.title && a.url && isFresh(a.publishedAt));
+
+  return sortByNewest(dedupeArticles(mapped));
+}
+
+/* =========================
+   Public API
+   ========================= */
+export async function getNewsForSymbol(symbol) {
+  console.log(`[news] Starting news fetch for ${symbol}`);
+
+  // 1) Prefer NewsAPI if available
+  try {
+    const primary = await fetchNewsAPI(symbol);
+    if (primary.length > 0) {
+      console.log(`[news] Found ${primary.length} articles from NewsAPI for ${symbol}`);
+      return primary;
+    } else {
+      console.log(`[news] NewsAPI returned no recent items for ${symbol}`);
+    }
   } catch (e) {
-    console.warn(`[news] Google News RSS failed for ${symbol}, trying Bing RSS:`, e.message || e);
+    console.warn(`[news] NewsAPI failed for ${symbol}:`, e.message || e);
+  }
+
+  // 2) RSS fallbacks in order of reliability
+  const sources = [
+    { name: 'Google News', fetcher: fetchGoogleNewsRSS },
+    { name: 'Yahoo Finance', fetcher: fetchYahooFinanceRSS },
+    { name: 'Economic Times', fetcher: fetchEconomicTimesRSS },
+    { name: 'Bing News', fetcher: fetchBingNewsRSS },
+  ];
+
+  for (const source of sources) {
     try {
-      const bing = await fetchBingNewsRSS(symbol);
-      return bing;
-    } catch (e2) {
-      console.warn(`[news] Bing RSS also failed for ${symbol}:`, e2.message || e2);
-      return [];
+      console.log(`[news] Trying ${source.name} for ${symbol}`);
+      const articles = await source.fetcher(symbol);
+      if (articles.length > 0) {
+        console.log(`[news] Found ${articles.length} articles from ${source.name} for ${symbol}`);
+        return articles;
+      } else {
+        console.log(`[news] No articles found from ${source.name} for ${symbol}`);
+      }
+    } catch (e) {
+      console.warn(`[news] ${source.name} failed for ${symbol}:`, e.message || e);
     }
   }
+
+  console.log(`[news] No news found for ${symbol} from any source`);
+  return [];
 }
