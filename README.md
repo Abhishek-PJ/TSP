@@ -163,9 +163,15 @@ You can run the project using pre-built images from Docker Hub instead of buildi
    docker pull abhishekpj/tsp-frontend:1.0.0
    ```
 
-2. **Start the services**:
+2. **Create the docker-compose.yml file**:
+  Copy the content of yml file from github which is in root folder and paste it in docker-compose.yml
+   
+   
+3. **Start the services**:
+   Go to the location where docker-compose.yml is present and run.
+   Use sudo if running in ubuntu
    ```bash
-   docker-compose up
+   docker-compose up -d   
    ```
 
    Services will be available at:
@@ -173,30 +179,15 @@ You can run the project using pre-built images from Docker Hub instead of buildi
    - Backend: http://localhost:4000
    - Agent: http://localhost:8000
 
-3. **Stop the services**:
+5. **Stop the services**:
    ```bash
    docker-compose down
-   ```
+    ```
 
-   **Note**: Ensure you have a `.env` file in each service directory (`agent/.env`, `backend/.env`, `frontend/.env`) with the required environment variables (e.g., `GEMINI_API_KEY` for the agent). Copy from the `.env.example` files if needed.
 
    **Docker Hub Repository**: [https://hub.docker.com/repositories/abhishekpj](https://hub.docker.com/repositories/abhishekpj)
 
-### Building Locally (Alternative)
 
-If you prefer to build the images yourself:
-
-```bash
-# Start all services
-docker-compose up --build
-
-# Services available at:
-# Frontend: http://localhost:5173
-# Backend: http://localhost:4000
-# Agent: http://localhost:8000
-
-# Stop services
-docker-compose down
 ```
 
 ## Libraries
