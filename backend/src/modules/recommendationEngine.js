@@ -1,5 +1,6 @@
 // backend/src/modules/recommendationEngine.js
-// Cheap first-pass sentiment using VADER; send only hard/impactful cases to Agno (LLM).
+// Cheap first-pass sentiment (VADER) + selective Agno + fast rule-based "today" prediction.
+// Works without ML training; uses current pct_change, volume, and sentiment as signals.
 
 import { getAgnoPicks } from './agnoClient.js';
 import { aggregateSentiment } from './sentimentService.js';
@@ -7,17 +8,39 @@ import { aggregateSentiment } from './sentimentService.js';
 /* =========================
    Tunables (env overridable)
    ========================= */
-const VADER_NEUTRAL_BAND = Number(process.env.VADER_NEUTRAL_BAND ?? 0.20); // |compound| < 0.20 -> neutral-ish
-const PRICE_CONFLICT_BAND = Number(process.env.PRICE_CONFLICT_BAND ?? 1.0); // % move that triggers conflict detection
-const BIG_MOVE_PCT = Number(process.env.BIG_MOVE_PCT ?? 3.0);              // abs(% change) considered "big"
-const HIGH_VOLUME = Number(process.env.HIGH_VOLUME_THRESHOLD ?? 1_000_000); // very high volume flag
-const REQUIRE_NEWS_FOR_LLM = String(process.env.REQUIRE_NEWS_FOR_LLM ?? 'false').toLowerCase() === 'true';
-const AGNO_MAX_PER_BATCH = Math.max(1, Number(process.env.AGNO_MAX_PER_BATCH ?? 100)); // extra safety cap
+const VADER_NEUTRAL_BAND   = numEnv('VADER_NEUTRAL_BAND', 0.20); // |compound| < -> neutral-ish
+const PRICE_CONFLICT_BAND  = numEnv('PRICE_CONFLICT_BAND', 1.00); // % move that triggers conflict
+const BIG_MOVE_PCT         = numEnv('BIG_MOVE_PCT', 3.00);        // abs(% change) considered "big"
+const HIGH_VOLUME_THRESHOLD= intEnv('HIGH_VOLUME_THRESHOLD', 1_000_000);
+const REQUIRE_NEWS_FOR_LLM = boolEnv('REQUIRE_NEWS_FOR_LLM', false);
+const AGNO_MAX_PER_BATCH   = intEnv('AGNO_MAX_PER_BATCH', 100);
+
+// Quick predictor knobs
+const PRED_LIMIT_ABS_PCT   = numEnv('PRED_LIMIT_ABS_PCT', 3.0);    // clamp ±3%
+const PRED_SENTIMENT_GAIN  = numEnv('PRED_SENTIMENT_GAIN', 2.0);    // sentiment weight
+const PRED_MOMENTUM_GAIN   = numEnv('PRED_MOMENTUM_GAIN', 0.25);    // pct_change carryover
+const PRED_VOL_1           = intEnv('PRED_VOL_1', 1_000_000);       // volume tier 1
+const PRED_VOL_2           = intEnv('PRED_VOL_2', 3_000_000);       // volume tier 2
+const PRED_VOL_GAIN_1      = numEnv('PRED_VOL_GAIN_1', 0.3);
+const PRED_VOL_GAIN_2      = numEnv('PRED_VOL_GAIN_2', 0.6);
 
 /* =========================
    Utilities
    ========================= */
-const clampUnit = (n) => Math.max(-1, Math.min(1, Number.isFinite(n) ? n : 0));
+function numEnv(k, def) {
+  const v = Number(process.env[k]);
+  return Number.isFinite(v) ? v : def;
+}
+function intEnv(k, def) {
+  const v = parseInt(process.env[k] ?? '', 10);
+  return Number.isFinite(v) ? v : def;
+}
+function boolEnv(k, def) {
+  const v = String(process.env[k] ?? '').trim().toLowerCase();
+  return v ? v === 'true' : def;
+}
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const clampUnit = (n) => clamp(Number.isFinite(n) ? n : 0, -1, 1);
 
 const vaderToRec = (label) => {
   const v = String(label || '').toLowerCase();
@@ -51,14 +74,9 @@ function generateVaderReason(sentiment, articleCount) {
   return `Neutral sentiment across ${count} articles`;
 }
 
-/**
- * Decide whether to escalate a symbol to LLM.
- * Heuristics:
- *  - Near-neutral VADER: |compound| < VADER_NEUTRAL_BAND
- *  - Conflict vs price:  Positive but % < -PRICE_CONFLICT_BAND OR Negative but % > PRICE_CONFLICT_BAND
- *  - Big movers or high volume
- *  - Optional: require at least one article
- */
+/* =========================
+   LLM selection heuristics
+   ========================= */
 function shouldSendToLLM(row, vader, articleCount) {
   const pct = Number(row?.pct_change ?? 0);
   const vol = Number(row?.volume ?? 0);
@@ -68,23 +86,14 @@ function shouldSendToLLM(row, vader, articleCount) {
 
   if (REQUIRE_NEWS_FOR_LLM && articleCount === 0) return false;
 
-  // Big move or very high volume -> likely impactful
-  if (absPct >= BIG_MOVE_PCT || vol >= HIGH_VOLUME) return true;
-
-  // Neutral-ish VADER -> LLM might add value
-  if (Math.abs(compound) < VADER_NEUTRAL_BAND) return true;
-
-  // Conflict: sentiment vs price direction
-  if (label === 'Positive' && pct <= -PRICE_CONFLICT_BAND) return true;
-  if (label === 'Negative' && pct >= PRICE_CONFLICT_BAND) return true;
+  if (absPct >= BIG_MOVE_PCT || vol >= HIGH_VOLUME_THRESHOLD) return true;       // impactful
+  if (Math.abs(compound) < VADER_NEUTRAL_BAND) return true;                      // uncertain
+  if (label === 'Positive' && pct <= -PRICE_CONFLICT_BAND) return true;          // conflict
+  if (label === 'Negative' && pct >= PRICE_CONFLICT_BAND) return true;           // conflict
 
   return false;
 }
 
-/**
- * Priority score (for optional ordering if you later add queueing):
- * large move + fresh news + volume
- */
 function priorityScore(row, articleCount) {
   const pct = Math.abs(Number(row?.pct_change ?? 0));
   const vol = Math.max(0, Number(row?.volume ?? 0));
@@ -92,11 +101,49 @@ function priorityScore(row, articleCount) {
 }
 
 /* =========================
+   Quick intraday predictor
+   ========================= */
+/**
+ * Fast, rule-based "how much it will move today" (% from current price)
+ * Blends:
+ *  - sentiment_score in [-1,1]
+ *  - momentum (current pct_change)
+ *  - simple volume tiers
+ */
+function predictTodayChangePct(row, sentimentScore) {
+  const pct = Number(row?.pct_change ?? 0);     // current day move so far
+  const vol = Number(row?.volume ?? 0);         // current volume
+  const s   = clampUnit(Number(sentimentScore)); // -1..1
+
+  // Volume boost (simple tiers)
+  let volBoost = 0;
+  if (vol >= PRED_VOL_2) volBoost = PRED_VOL_GAIN_2;
+  else if (vol >= PRED_VOL_1) volBoost = PRED_VOL_GAIN_1;
+
+  const momentum = clamp(pct, -3, 3) * PRED_MOMENTUM_GAIN;     // carry some momentum, bounded
+  const sentimentBoost = s * PRED_SENTIMENT_GAIN;              // map [-1,1] -> roughly ±2%
+  let pred = sentimentBoost + volBoost + momentum;
+
+  pred = clamp(pred, -PRED_LIMIT_ABS_PCT, PRED_LIMIT_ABS_PCT); // keep sane bounds
+
+  // Confidence: blend of |sentiment|, |momentum|, and volume tier
+  const confSent = Math.abs(s);                                 // 0..1
+  const confMom  = clamp(Math.abs(pct) / PRED_LIMIT_ABS_PCT, 0, 1);
+  const confVol  = volBoost > 0 ? (volBoost / PRED_VOL_GAIN_2) : 0; // 0..1
+  const confidence = clamp(0.25 + 0.5 * confSent + 0.15 * confMom + 0.10 * confVol, 0.2, 0.95);
+
+  const trend = pred > 0.15 ? 'bullish' : pred < -0.15 ? 'bearish' : 'sideways';
+  const risk_level = confidence >= 0.75 ? 'low' : confidence >= 0.5 ? 'medium' : 'high';
+  const volatility = clamp(Math.abs(pred) / PRED_LIMIT_ABS_PCT, 0, 1);
+
+  return { pred, confidence, trend, risk_level, volatility };
+}
+
+/* =========================
    Public API
    ========================= */
-
 /**
- * Enhanced recommendation builder using VADER first, then Agno (LLM) only for selected cases.
+ * Enhanced recommendations + immediate intraday prediction.
  * @param {Array<{symbol:string, open:number, ltp:number, pct_change:number, volume:number}>} candidates
  * @param {Object<string, Array<{title:string, summary:string, url?:string, publishedAt?:string}>>} newsMap
  * @returns {Promise<Array<Object>>}
@@ -104,7 +151,7 @@ function priorityScore(row, articleCount) {
 export async function buildEnhancedRecommendations(candidates, newsMap) {
   if (!Array.isArray(candidates) || candidates.length === 0) return [];
 
-  // 1) VADER for everyone (fast, local)
+  // 1) VADER pass
   const baseRows = candidates.map((row) => {
     const articles = Array.isArray(newsMap?.[row.symbol]) ? newsMap[row.symbol] : [];
     const vader = aggregateSentiment(articles) || { compound: 0, label: 'Neutral', count: 0 };
@@ -121,18 +168,16 @@ export async function buildEnhancedRecommendations(candidates, newsMap) {
     };
   });
 
-  // 2) Choose a subset for Agno (respect cap)
+  // 2) Agno subset
   const llmCandidates = baseRows
     .filter((x) => x.needsLLM)
     .sort((a, b) => b.priority - a.priority)
-    .slice(0, AGNO_MAX_PER_BATCH); // soft cap to avoid bursts
+    .slice(0, AGNO_MAX_PER_BATCH);
 
   const llmSymbols = llmCandidates.map((x) => x.row.symbol);
-  const useAgno = llmSymbols.length > 0;
-
-  // 3) Call Agno once for the selected subset (it will return null if disabled)
   let agnoMap = new Map();
-  if (useAgno) {
+
+  if (llmSymbols.length > 0) {
     try {
       const subNewsMap = {};
       for (const x of llmCandidates) subNewsMap[x.row.symbol] = x.articles;
@@ -143,53 +188,57 @@ export async function buildEnhancedRecommendations(candidates, newsMap) {
         }
       }
     } catch {
-      // If Agno fails, we simply leave agnoMap empty and keep VADER results.
-      agnoMap = new Map();
+      agnoMap = new Map(); // fallback silently to VADER
     }
   }
 
-  // 4) Merge: for LLM subset (when result exists & no error), replace VADER-derived recommendation
+  // 3) Merge + fast prediction
   const enriched = baseRows.map(({ row, vader, rec, articles }) => {
     const articleCount = articles.length;
-    const cachedVader = {
-      compound: clampUnit(vader.compound),
-      label: String(vader.label || 'Neutral'),
-      count: articleCount,
-      source: 'vader',
-    };
+    const vaderCompound = clampUnit(vader.compound);
 
     const agno = agnoMap.get(row.symbol);
+    let finalScore = vaderCompound;
+    let finalLabel = rec; // BULLISH/WATCH/SKIP
+    let reason = generateVaderReason(vader, articleCount);
+    let source = 'vader';
+
     if (agno && !agno.error) {
       const score = clampUnit(Number(agno.sentiment_score));
-      const agnoLabel = normRec(agno.sentiment_label);
-      const reason = String(agno.reason || '').trim() || 'AI summary';
-
-      return {
-        ...row,
-        sentiment: {
-          compound: score,
-          label: mapAgnoLabelToVader(agnoLabel),
-          count: articleCount,
-          source: 'agno',
-        },
-        sentiment_score: score,
-        sentiment_label: agnoLabel,
-        reason,
-        recommendation: agnoLabel,
-        enhanced_recommendation: agnoLabel,
-      };
+      finalScore = score;
+      finalLabel = normRec(agno.sentiment_label);
+      reason = String(agno.reason || '').trim() || 'AI summary';
+      source = 'agno';
     }
 
-    // No Agno (not selected, disabled, or failed) -> keep VADER
-    const vaderRec = rec; // BULLISH/WATCH/SKIP
+    // ---- Quick intraday prediction block ----
+    const { pred, confidence, trend, risk_level, volatility } = predictTodayChangePct(row, finalScore);
+    const ltp = Number(row.ltp ?? 0);
+    const targetPrice = Number.isFinite(ltp) ? Math.round(ltp * (1 + pred / 100)) : null;
+
     return {
       ...row,
-      sentiment: cachedVader,
-      sentiment_score: clampUnit(vader.compound),
-      sentiment_label: vaderRec,
-      reason: generateVaderReason(vader, articleCount),
-      recommendation: vaderRec,
-      enhanced_recommendation: vaderRec,
+      sentiment: {
+        compound: finalScore,
+        label: source === 'agno' ? mapAgnoLabelToVader(finalLabel) : String(vader.label || 'Neutral'),
+        count: articleCount,
+        source,
+      },
+      sentiment_score: finalScore,
+      sentiment_label: finalLabel,
+      reason,
+      recommendation: finalLabel,
+      enhanced_recommendation: finalLabel,
+
+      // 👇 New prediction payload for UI badges/cards
+      prediction: {
+        predicted_change_pct: Number(pred.toFixed(2)),
+        trend,
+        confidence: Number(confidence.toFixed(2)),
+        risk_level,
+        volatility: Number(volatility.toFixed(2)),
+        price_targets: targetPrice ? [targetPrice] : [],
+      },
     };
   });
 

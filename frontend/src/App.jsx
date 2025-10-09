@@ -24,6 +24,112 @@ function Badge({ text, variant = 'neutral' }) {
   );
 }
 
+/** Prediction pill used in table + sidebar */
+function PredictionBadge({ prediction }) {
+  if (!prediction) return null;
+
+  const confidence = Number(prediction.confidence ?? 0);
+  const trend = prediction.trend || 'sideways';
+  const target = Array.isArray(prediction.price_targets) && prediction.price_targets[0];
+  const pct = Number(prediction.predicted_change_pct ?? 0);
+
+  const trendStyles = {
+    bullish: 'text-green-700 bg-green-50 border-green-200',
+    bearish: 'text-red-700 bg-red-50 border-red-200',
+    sideways: 'text-slate-700 bg-slate-50 border-slate-200',
+  };
+  const emoji = trend === 'bullish' ? '📈' : trend === 'bearish' ? '📉' : '➡️';
+  const confColor = confidence > 0.75 ? 'text-green-700' : confidence > 0.5 ? 'text-amber-700' : 'text-red-700';
+
+  return (
+    <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-lg border text-xs ${trendStyles[trend]}`}>
+      <div className="flex items-center gap-1">
+        <span>{emoji}</span>
+        <span className="font-semibold">
+          {pct > 0 ? '+' : ''}{pct.toFixed(2)}%
+        </span>
+      </div>
+      {Number.isFinite(target) && (
+        <div className="text-xs text-slate-700">
+          → ₹{Number(target).toFixed(0)}
+        </div>
+      )}
+      <div className={`text-[11px] ${confColor}`}>{Math.round(confidence * 100)}%</div>
+    </div>
+  );
+}
+
+/** AI analysis card (reason/risk/volatility) */
+function EnhancedReasoning({ reasoning, prediction }) {
+  if (!reasoning && !prediction) return null;
+  const risk = prediction?.risk_level || '—';
+  const vol = prediction?.volatility != null ? `${Math.round(prediction.volatility * 100)}%` : '—';
+
+  return (
+    <div className="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-200">
+      <div className="text-xs font-semibold text-slate-700">AI Analysis</div>
+      {reasoning && <div className="mt-1 text-sm text-slate-700">{reasoning}</div>}
+      {prediction && (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <span className="text-slate-500">Risk:</span>{' '}
+            <span className={`font-semibold ${
+              risk === 'low' ? 'text-green-700' : risk === 'medium' ? 'text-amber-700' : 'text-red-700'
+            }`}>{String(risk).toUpperCase()}</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Volatility:</span>{' '}
+            <span className="font-semibold">{vol}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** --- NEW: Client-side fallback prediction if backend didn't provide one --- */
+function derivePrediction(row) {
+  // Inputs we already have on each row
+  const pct = Number(row.pct_change ?? 0);
+  const ltp = Number(row.ltp ?? 0);
+
+  // Map your labels into a directional bias (in percentage points)
+  const label = (row.sentiment_label || row.recommendation || '').toUpperCase();
+  let bias = 0; // percentage points
+  if (label === 'BULLISH') bias = 0.7;            // tilt upward ~ +0.7%
+  else if (label === 'WATCH') bias = 0.2;         // small upside
+  else if (label === 'SKIP') bias = -0.6;         // tilt down
+
+  // Smooth current move into the prediction but keep it bounded
+  const baseMove = Math.max(-3, Math.min(3, pct)); // clamp current move to [-3, 3]
+  const predicted_change_pct = Number((baseMove * 0.4 + bias).toFixed(2));
+
+  const trend = predicted_change_pct > 0.3 ? 'bullish'
+               : predicted_change_pct < -0.3 ? 'bearish'
+               : 'sideways';
+
+  // Build a simple confidence heuristic
+  const confidence = Math.max(0.3, Math.min(0.9,
+    0.5 + (Math.abs(bias) / 1.2) + (Math.abs(baseMove) / 20)
+  ));
+
+  // Risk/volatility quick proxy
+  const risk_level = trend === 'bullish' ? 'low' : trend === 'sideways' ? 'medium' : 'high';
+  const volatility = Math.max(0, Math.min(1, (Number(row.volume || 0) / 2_000_000)));
+
+  // One-step target from LTP
+  const target = Number.isFinite(ltp) ? ltp * (1 + predicted_change_pct / 100) : null;
+
+  return {
+    predicted_change_pct,
+    confidence,
+    trend,
+    risk_level,
+    volatility,
+    price_targets: Number.isFinite(target) ? [target] : [],
+  };
+}
+
 function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -32,17 +138,16 @@ function App() {
   const [marketOpen, setMarketOpen] = useState(true);
   const [sessionDate, setSessionDate] = useState('');
   const [totalCandidates, setTotalCandidates] = useState(0);
-  const [health, setHealth] = useState({ redis: false });
 
   const [chartOpen, setChartOpen] = useState(false);
   const [chartSymbol, setChartSymbol] = useState('');
+  const [selectedRow, setSelectedRow] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState('');
   const [newsArticles, setNewsArticles] = useState([]);
 
-  // Sorting persistence via URL/localStorage only
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Read persisted sort on first render only
@@ -57,22 +162,19 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const [sortKey, setSortKey] = useState(initialPersist.sortKey); // symbol | pct_change | open | ltp | volume
-  const [sortDir, setSortDir] = useState(initialPersist.sortDir); // asc | desc
-
-  // TanStack Table sorting state (shared across all three tables)
+  const [sortKey, setSortKey] = useState(initialPersist.sortKey);
+  const [sortDir, setSortDir] = useState(initialPersist.sortDir);
   const [sorting, setSorting] = useState(() => [{ id: initialPersist.sortKey, desc: initialPersist.sortDir === 'desc' }]);
 
-  // TanStack Table column visibility state (shared across tables)
   const [columnVisibility, setColumnVisibility] = useState({
     symbol: true,
     pct_change: true,
     open: true,
     ltp: true,
     volume: true,
+    prediction: true,
   });
 
-  // Category visibility checkboxes
   const [showBull, setShowBull] = useState(true);
   const [showWatch, setShowWatch] = useState(true);
   const [showSkip, setShowSkip] = useState(true);
@@ -82,21 +184,26 @@ function App() {
     setShowBull(next);
     setShowWatch(next);
     setShowSkip(next);
+    setColumnVisibility({
+      symbol: next,
+      pct_change: next,
+      open: next,
+      ltp: next,
+      volume: next,
+      prediction: next,
+    });
   }
 
-  // Persist sort to URL + localStorage
   useEffect(() => {
     const state = { sortKey, sortDir };
     try { localStorage.setItem('tsp_ui_state', JSON.stringify(state)); } catch {}
     setSearchParams(state, { replace: true });
   }, [sortKey, sortDir, setSearchParams]);
 
-  // Keep TanStack sorting updated when our persisted sort changes
   useEffect(() => {
     setSorting([{ id: sortKey, desc: sortDir === 'desc' }]);
   }, [sortKey, sortDir]);
 
-  // When TanStack sorting changes (via header clicks), update our persisted state
   const onSortingChange = useCallback((updater) => {
     setSorting((prev) => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
@@ -109,21 +216,19 @@ function App() {
     });
   }, []);
 
-  // Memoize handlers so columns memo stays stable
   const selectSymbol = useCallback((sym) => {
     setChartSymbol(sym);
+    setSelectedRow((prev) => {
+      const r = picks.find(p => p.symbol === sym);
+      return r || null;
+    });
     setSidebarOpen(true);
-  }, []);
-  const openChartModal = useCallback(() => {
-    if (chartSymbol) setChartOpen(true);
-  }, [chartSymbol]);
-  const closeChart = useCallback(() => setChartOpen(false), []);
-  const closeSidebar = useCallback(() => {
-    setSidebarOpen(false);
-    setChartSymbol('');
-  }, []);
+  }, [picks]);
 
-  // Columns (stable thanks to memoized handlers)
+  const openChartModal = useCallback(() => { if (chartSymbol) setChartOpen(true); }, [chartSymbol]);
+  const closeChart = useCallback(() => setChartOpen(false), []);
+  const closeSidebar = useCallback(() => { setSidebarOpen(false); setChartSymbol(''); setSelectedRow(null); }, []);
+
   const columns = useMemo(() => [
     {
       header: 'Symbol',
@@ -147,12 +252,10 @@ function App() {
       accessorKey: 'pct_change',
       size: 70,
       cell: ({ row }) => (
-        <div>
-          <Badge
-            text={`${row.original.pct_change >= 0 ? '+' : ''}${row.original.pct_change.toFixed(2)}%`}
-            variant={row.original.pct_change >= 0 ? 'positive' : 'negative'}
-          />
-        </div>
+        <Badge
+          text={`${row.original.pct_change >= 0 ? '+' : ''}${row.original.pct_change.toFixed(2)}%`}
+          variant={row.original.pct_change >= 0 ? 'positive' : 'negative'}
+        />
       ),
       sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
     },
@@ -177,9 +280,95 @@ function App() {
       cell: ({ row }) => <span className="font-mono">{row.original.volume.toLocaleString()}</span>,
       sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
     },
+    {
+      header: 'Prediction',
+      accessorKey: 'prediction',
+      size: 160,
+      cell: ({ row }) => <PredictionBadge prediction={row.original.prediction} />,
+      sortingFn: (a, b, columnId) => {
+        const aVal = a.getValue(columnId)?.confidence ?? 0;
+        const bVal = b.getValue(columnId)?.confidence ?? 0;
+        return aVal - bVal;
+      },
+    },
   ], [selectSymbol]);
 
-  // Pre-sort by pct_change just for category bucketing (table sorting remains interactive)
+
+function DataTable({ data, highlight, hoverBg, borderColor }) {
+  const table = useReactTable({
+    data,
+    columns,
+    state: { sorting, columnVisibility },
+    onSortingChange,
+    onColumnVisibilityChange: setColumnVisibility,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  return (
+    <table className="w-full table-fixed text-left">
+      <thead>
+        {table.getHeaderGroups().map((hg) => (
+          <tr key={hg.id} className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
+            {hg.headers.map((header) => {
+              const sorted = header.column.getIsSorted();
+              return (
+                <th key={header.id} className="px-4 py-3 text-center font-semibold">
+                  {header.isPlaceholder ? null : (
+                    <button
+                      type="button"
+                      className="font-semibold hover:underline inline-flex items-center justify-center gap-1 w-full"
+                      onClick={header.column.getToggleSortingHandler()}
+                    >
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                      {sorted === 'asc' && <span>↑</span>}
+                      {sorted === 'desc' && <span>↓</span>}
+                    </button>
+                  )}
+                </th>
+              );
+            })}
+          </tr>
+        ))}
+      </thead>
+      <tbody className="text-sm">
+        <AnimatePresence initial={false}>
+          {table.getRowModel().rows.map((row) => (
+            <motion.tr
+              key={row.id}
+              layout
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18 }}
+              className={`border-t border-slate-200 transition-colors border-l-4 ${
+                row.original.symbol === chartSymbol
+                  ? `${highlight} ${borderColor}`
+                  : `border-transparent ${hoverBg}`
+              }`}
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td key={cell.id} className="px-4 py-3 text-slate-800 text-center">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </motion.tr>
+          ))}
+        </AnimatePresence>
+
+        {table.getRowModel().rows.length === 0 && (
+          <tr>
+            <td colSpan={columns.length} className="px-4 py-3 text-slate-500 text-center">
+              No data.
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+
   const sortedForBuckets = useMemo(
     () => [...picks].sort((a, b) => b.pct_change - a.pct_change),
     [picks]
@@ -201,84 +390,7 @@ function App() {
     };
   }, [sortedForBuckets]);
 
-  // DataTable component (shared config)
-  function DataTable({ data, highlight, hoverBg, borderColor }) {
-    const table = useReactTable({
-      data,
-      columns,
-      state: { sorting, columnVisibility },
-      onSortingChange,
-      onColumnVisibilityChange: setColumnVisibility,
-      getCoreRowModel: getCoreRowModel(),
-      getSortedRowModel: getSortedRowModel(),
-    });
-
-    return (
-      <table className="w-full table-fixed text-left">
-        <thead>
-          {table.getHeaderGroups().map((hg) => (
-            <tr key={hg.id} className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
-              {hg.headers.map((header) => {
-                const sorted = header.column.getIsSorted();
-                return (
-                  <th key={header.id} className="px-4 py-3 text-center font-semibold">
-                    {header.isPlaceholder ? null : (
-                      <button
-                        type="button"
-                        className="font-semibold hover:underline inline-flex items-center justify-center gap-1 w-full"
-                        onClick={header.column.getToggleSortingHandler()}
-                      >
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {sorted === 'asc' && <span>↑</span>}
-                        {sorted === 'desc' && <span>↓</span>}
-                      </button>
-                    )}
-                  </th>
-                );
-              })}
-            </tr>
-          ))}
-        </thead>
-        <tbody className="text-sm">
-          <AnimatePresence initial={false}>
-            {table.getRowModel().rows.map((row) => (
-              <motion.tr
-                key={row.id}
-                layout
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.18 }}
-                className={`border-t border-slate-200 transition-colors border-l-4 ${
-                  row.original.symbol === chartSymbol
-                    ? `${highlight} ${borderColor}`
-                    : `border-transparent ${hoverBg}`
-                }`}
-              >
-                {row.getVisibleCells().map((cell) => {
-                  const columnId = cell.column.id;
-                  return (
-                    <td key={cell.id} className="px-4 py-3 text-slate-800 text-center">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  );
-                })}
-              </motion.tr>
-            ))}
-          </AnimatePresence>
-          {table.getRowModel().rows.length === 0 && (
-            <tr>
-              <td colSpan={columns.length} className="px-4 py-3 text-slate-500 text-center">
-                No data.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    );
-  }
-
-  // Fetch picks
+  // Fetch picks + attach fallback predictions when missing
   const fetchPicks = useCallback(async () => {
     try {
       setLoading(true);
@@ -286,17 +398,29 @@ function App() {
       const res = await fetch(`${API_BASE}/api/picks/today`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+
+      const rows = Array.isArray(data.results) ? data.results : [];
+      const withPrediction = rows.map((r) => {
+        if (r && r.prediction) return r;
+        return { ...r, prediction: derivePrediction(r) };
+      });
+
       setAsOf(data.asOf);
       setMarketOpen(data.marketOpen !== false);
       setSessionDate(data.sessionDate || '');
       setTotalCandidates(data.totalCandidates || 0);
-      setPicks(data.results || []);
+      setPicks(withPrediction);
+
+      if (sidebarOpen && chartSymbol) {
+        const fresh = withPrediction.find(p => p.symbol === chartSymbol);
+        setSelectedRow(fresh || null);
+      }
     } catch (e) {
       setError(e.message || 'Failed to load picks');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sidebarOpen, chartSymbol]);
 
   useEffect(() => {
     fetchPicks();
@@ -304,27 +428,7 @@ function App() {
     return () => clearInterval(id);
   }, [fetchPicks]);
 
-  // Load health status
-  useEffect(() => {
-    let active = true;
-    async function loadHealth() {
-      try {
-        const res = await fetch(`${API_BASE}/health`);
-        if (res.ok) {
-          const data = await res.json();
-          if (active) setHealth({ redis: !!data.redis });
-        }
-      } catch {}
-    }
-    loadHealth();
-    const id = setInterval(loadHealth, 60_000);
-    return () => {
-      active = false;
-      clearInterval(id);
-    };
-  }, []);
-
-  // Load news for the selected chart symbol to show in sidebar
+  // News for sidebar
   useEffect(() => {
     if (!chartSymbol) { setNewsArticles([]); setNewsError(''); return; }
     let abort = false;
@@ -346,7 +450,7 @@ function App() {
     return () => { abort = true; };
   }, [chartSymbol]);
 
-  // Helper: format date as dd-mm-yyyy, handling ISO yyyy-mm-dd strings
+  // Date helpers
   function formatDateDMY(v) {
     if (!v) return '';
     if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
@@ -360,8 +464,6 @@ function App() {
     const yyyy = d.getFullYear();
     return `${dd}-${mm}-${yyyy}`;
   }
-
-  // Helper: format date-time as dd-mm-yyyy hh:mm (24h)
   function formatDateTimeDMY(v) {
     if (!v) return '';
     const d = new Date(v);
@@ -405,7 +507,6 @@ function App() {
                 <div className="text-xs text-slate-600">{formatDateTimeDMY(asOf)}</div>
               </div>
             )}
-            
           </div>
         </div>
       </header>
@@ -457,7 +558,7 @@ function App() {
               <div className="border-b border-slate-200 px-6 py-4 flex items-center justify-between">
                 <div>
                   <div className="text-lg font-bold text-slate-900">Today&apos;s Market Picks</div>
-                  <div className="text-sm text-slate-600">AI-curated investment opportunities</div>
+                  <div className="text-sm text-slate-600">AI-curated investment opportunities with intraday prediction</div>
                 </div>
                 {loading && <div className="text-sm text-slate-600">Loading…</div>}
               </div>
@@ -515,6 +616,7 @@ function App() {
                         { key: 'open', label: 'Open' },
                         { key: 'ltp', label: 'LTP' },
                         { key: 'volume', label: 'Volume' },
+                        { key: 'prediction', label: 'Prediction' },
                       ].map((c) => (
                         <label key={c.key} className="inline-flex items-center gap-2">
                           <input
@@ -541,7 +643,7 @@ function App() {
                             <div className="text-lg font-bold text-slate-900">Bullish</div>
                             <div className="text-xs tracking-wide text-slate-600">Top 5 stocks with strong positive sentiment</div>
                           </div>
-                          <Badge text={`${grouped.bull.length}picks`} variant="bullish" />
+                          <Badge text={`${grouped.bull.length} picks`} variant="bullish" />
                         </div>
                         <div className="relative max-h-[60vh] overflow-auto">
                           <DataTable
@@ -611,7 +713,7 @@ function App() {
             </div>
           </div>
 
-          {/* Right sidebar: Live Chart and Latest News (animated) */}
+          {/* Right sidebar: Live Chart + News + AI Analysis */}
           <AnimatePresence>
             {sidebarOpen && (
               <motion.aside
@@ -650,6 +752,15 @@ function App() {
                     )}
                   </div>
                 </div>
+
+                {/* AI Analysis card */}
+                {selectedRow && (
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-6 py-4">
+                    <div className="text-lg font-bold text-slate-900">AI Prediction</div>
+                    <div className="mt-2"><PredictionBadge prediction={selectedRow.prediction} /></div>
+                    <EnhancedReasoning reasoning={selectedRow.reason} prediction={selectedRow.prediction} />
+                  </div>
+                )}
 
                 <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
                   <div className="border-b border-slate-200 px-6 py-4">
