@@ -1,143 +1,268 @@
 # Trendy Stocks Predictor
 
-A full-stack app that surfaces intraday stock candidates using numeric filters and recent news sentiment, with a modern, responsive UI.
+A full-stack app that surfaces intraday stock candidates using numeric filters and AI-powered news sentiment analysis.
 
-- Frontend: React (Vite) + Tailwind CSS
-- Backend: Node.js + Express
-- Cache: In-memory TTL (pluggable to Redis)
-- Data: NSE feed and news (can be swapped for real providers)
+## Stack
+- **Frontend**: React (Vite) + Tailwind CSS
+- **Backend**: Node.js + Express
+- **Agent**: Python (Agno) + Google Gemini 1.5 Flash
+- **Cache**: Redis (with in-memory fallback)
+- **Data**: NSE feed + multi-source news (Google News RSS, Bing RSS, NewsAPI)
 
 ## Prerequisites
-- Windows PowerShell (or any terminal)
-- Node.js 20.19+ recommended
+- Node.js 20.19+
+- Python 3.11+ (for AI agent)
+- Redis (optional, recommended)
+- Google Gemini API key (free tier available - no credit card required)
 
 ## Quick Start
-Open two terminals.
 
-### 1) Backend
+### Option 1: With AI Sentiment (Recommended)
+
+**Terminal 1 - Agent Service**
 ```bash
-# Terminal 1
-# CWD: project root
+cd agent
+pip install -r requirements.txt
+uvicorn server:app --reload --port 8000
+```
+
+**Terminal 2 - Backend**
+```bash
 cd backend
 npm install
 npm run dev
 # API on http://localhost:4000
 ```
 
-### 2) Frontend
+**Terminal 3 - Frontend**
 ```bash
-# Terminal 2
-# CWD: project root
 cd frontend
 npm install
 npm run dev
 # App on http://localhost:5173
 ```
 
-If the frontend was already running before the proxy/env changes, restart it.
+### Option 2: Without AI (VADER Fallback Only)
+
+**Terminal 1 - Backend**
+```bash
+cd backend
+npm install
+npm run dev
+```
+
+**Terminal 2 - Frontend**
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
 ## Configuration
-- Frontend base URL: `VITE_API_BASE` (optional)
-  - Create `frontend/.env` and set:
-    ```env
-    VITE_API_BASE=http://localhost:4000
-    ```
-  - Defaults to `http://localhost:4000` if not set.
-- Backend port: `.env` in `backend/` (optional)
-  ```env
-  PORT=4000
-  ```
+
+### Agent Service (`agent/.env`)
+```env
+GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_MODEL=gemini-1.5-flash
+REDIS_URL=redis://localhost:6379/0
+```
+
+**Get your free Gemini API key**: https://aistudio.google.com/app/apikey  
+✅ No credit card required for free tier (15 RPM, 1M tokens/day)
+
+### Backend (`backend/.env`)
+```env
+PORT=4000
+
+# Redis (optional)
+REDIS_URL=redis://localhost:6379
+
+# Agno Agent
+AGNO_ENABLED=true
+AGNO_URL=http://localhost:8000
+AGNO_TIMEOUT_MS=15000
+```
+
+### Frontend (`frontend/.env`)
+```env
+VITE_API_BASE=http://localhost:4000
 
 ## Features
-- Numeric filtering
-  - Price gain between +1% and +3%
-  - Open ≥ ₹50
-  - Volume ≥ 100,000
-- 48h news window per symbol with simple sentiment aggregation
-- Recommendations
-  - BULLISH if positive sentiment
-  - SKIP if negative
-  - WATCH otherwise
-- Picks endpoint computes recommendations and returns enriched rows
-- Live OHLC endpoint for candlestick charts
-- Modern UI/UX
-  - Sticky right sidebar with mini live chart and latest news
-  - Click a symbol to select it: the right sidebar opens and loads the chart + news
-  - Row interactions: category-colored hover and persistent selection
-    - Bullish: emerald accents
-    - Watch: amber accents
-    - Skip: rose accents
-  - Full candlestick chart modal (click the mini chart)
-  - Professional typography and subtle app background gradient
-  - Summary cards (Bullish / Watch / Skip / Total)
-  - Health badge (Redis connected/disconnected)
-  - Market open/closed banner; shows last session’s picks when closed
+
+### Core Functionality
+- **Numeric Filters**: Price gain +1% to +3%, Open ≥ ₹50, Volume ≥ 100K
+- **AI Sentiment Analysis**:
+  - Agno + Google Gemini 1.5 Flash: Context-aware scoring with detailed reasoning
+  - Automatic VADER fallback if AI unavailable
+  - 48h news window per symbol
+  - Labels: BULLISH, WATCH, SKIP
+  - **Free tier**: 15 RPM, 1M tokens/day - no credit card needed
+- **Resilient Architecture**:
+  - Feature flag toggle (`AGNO_ENABLED`)
+  - 15s timeout protection
+  - Graceful fallbacks
+  - Performance metrics tracking
+{{ ... }}
+### UI/UX
+- Sticky sidebar with mini chart and news
+- Click symbol to view details
+- Category-colored interactions (Bullish=emerald, Watch=amber, Skip=rose)
+- Full candlestick chart modal
+- Summary cards and health badges
+- Market open/closed banner
+- Cached picks during off-hours
 
 ## API Endpoints
-- `GET /health`
-  - Returns `{ status, time, redis }`
-- `GET /api/snapshot`
-  - Latest market snapshot (cached ~30s)
-- `GET /api/candidates`
-  - Snapshot filtered by numeric rules
-- `GET /api/news/:symbol`
-  - Recent articles for `:symbol` (cached 10m during market; cached-only when market closed)
-- `GET /api/picks/today`
-  - Enriched candidates with sentiment + recommendation
-  - During market hours: live computation with 10m news cache
-  - Off hours: serves cached last session results (or builds from previous session snapshot if not available)
-- `GET /api/ohlc/:symbol`
-  - Returns OHLC candles for charts
-  - Query params: `interval` (e.g., 1m, 5m, 15m, 1h, 1d), `range` (e.g., 1d,5d,1mo,3mo,6mo,1y,5y)
 
-## Libraries & Packages
+### Backend (Port 4000)
+- `GET /health` - Health check with Agno metrics
+- `GET /api/snapshot` - Market snapshot (cached 30s)
+- `GET /api/candidates` - Filtered candidates
+- `GET /api/news/:symbol` - Recent news (cached 10m)
+- `GET /api/picks/today` - **AI-enhanced picks** with sentiment
+- `GET /api/ohlc/:symbol` - OHLC candles for charts
 
-### Frontend (React + Vite)
-- react: ^19.1.1
-- react-dom: ^19.1.1
-- react-router-dom: ^7.8.2
-- lightweight-charts: ^4.2.3
-- tailwindcss: ^4.1.13
-- @tailwindcss/vite: ^4.1.13
-- @tailwindcss/postcss: ^4.1.13
-- vite: ^7.1.2
-- @vitejs/plugin-react: ^5.0.0
-- postcss: ^8.5.6
-- autoprefixer: ^10.4.21
-- eslint: ^9.33.0
-- @eslint/js: ^9.33.0
-- eslint-plugin-react-hooks: ^5.2.0
-- eslint-plugin-react-refresh: ^0.4.20
-- globals: ^16.3.0
-- @types/react: ^19.1.10
-- @types/react-dom: ^19.1.7
+### Agent Service (Port 8000)
+- `POST /picks` - Analyze sentiment for symbols
+- `GET /health` - Agent health check
 
-### Backend (Node + Express)
-- express: ^4.19.2
-- cors: ^2.8.5
-- dotenv: ^16.4.5
-- node-fetch: ^3.3.2
-- node-cron: ^4.2.1
-- fast-xml-parser: ^5.2.5
-- ioredis: ^5.7.0
-- vader-sentiment: ^1.1.3
-- nodemon: ^3.1.0 (dev)
+## Testing
+
+### Automated Test
+```powershell
+# PowerShell
+.\test-agno-integration.ps1
+
+# Bash
+chmod +x test-agno-integration.sh
+./test-agno-integration.sh
+```
+
+### Manual Test
+```powershell
+# Test agent
+curl http://localhost:8000/health
+
+# Test backend with AI sentiment
+curl http://localhost:4000/api/picks/today
+
+# Check that results include sentiment_score, sentiment_label, reason
+```
+
+## Docker Deployment
+
+
+### Using Pre-built Images from Docker Hub
+
+You can run the project using pre-built images from Docker Hub instead of building locally. This is faster and doesn't require the source code.
+
+1. **Pull the images**:
+   ```bash
+   docker pull abhishekpj/tsp-agent:1.0.0
+   docker pull abhishekpj/tsp-backend:1.0.0
+   docker pull abhishekpj/tsp-frontend:1.0.0
+   ```
+
+2. **Create the docker-compose.yml file**:
+  Copy the content of yml file from github which is in root folder and paste it in docker-compose.yml
+   
+   
+3. **Start the services**:
+   Go to the location where docker-compose.yml is present and run.
+   Use sudo if running in ubuntu
+   ```bash
+   docker-compose up -d   
+   ```
+
+   Services will be available at:
+   - Frontend: http://localhost:5173
+   - Backend: http://localhost:4000
+   - Agent: http://localhost:8000
+
+5. **Stop the services**:
+   ```bash
+   docker-compose down
+    ```
+
+
+   **Docker Hub Repository**: [https://hub.docker.com/repositories/abhishekpj](https://hub.docker.com/repositories/abhishekpj)
+
+
+```
+
+## Libraries
+
+### Agent (Python)
+- agno - AI agent framework
+- fastapi - Web framework
+- uvicorn - ASGI server
+- redis - Caching
+- google-generativeai - Gemini API integration
+
+### Backend (Node.js)
+- express ^4.19.2
+- node-fetch ^3.3.2 - HTTP client for agent
+- ioredis ^5.7.0 - Redis client
+- vader-sentiment ^1.1.3 - Fallback
+- node-cron ^4.2.1
+
+### Frontend (React)
+- react ^19.1.1
+- react-router-dom ^7.8.2
+- lightweight-charts ^4.2.3
+- tailwindcss ^4.1.13
+
+## Cost Estimation
+- **Tokens per request**: ~7,500 (50 symbols × 150 tokens)
+- **With 10m caching**: ~6 requests/hour during market
+- **Daily cost**: **FREE** with Gemini 1.5 Flash (within 1M tokens/day limit)
+- **Free tier limits**: 15 requests/min, 1M tokens/day, 1500 requests/day
+
+## Troubleshooting
+
+### Agent won't start
+```bash
+pip install -r requirements.txt
+# Verify GEMINI_API_KEY is set in agent/.env
+# Get free key at: https://aistudio.google.com/app/apikey
+```
+
+### Backend can't reach agent
+```bash
+# Check agent is running: curl http://localhost:8000/health
+# Verify backend .env: AGNO_ENABLED=true, AGNO_URL=http://localhost:8000
+```
+
+### All picks use VADER (not AI)
+```bash
+# Check sentiment.source field in API response
+# If "vader": agent is disabled or unavailable
+# Verify AGNO_ENABLED=true in backend/.env
+```
 
 ## Project Structure
 ```
 TSP/
+  agent/                        # Python Agno service
+    server.py                   # FastAPI app with Agno agent
+    requirements.txt            # Python dependencies
+    .env.example                # Environment template
+    Dockerfile                  # Container definition
+    README.md                   # Agent-specific docs
   backend/
     src/
-      index.js
+      index.js                  # Main server 
       modules/
-        marketFeed.js
-        filters.js
-        newsFetcher.js
-        sentimentService.js
-        recommendationEngine.js
-        cache.js
+        marketFeed.js           # NSE data feed
+        filters.js              # Numeric filters
+        newsFetcher.js          # Multi-source news
+        sentimentService.js     # VADER fallback
+        recommendationEngine.js # Agno integration
+        agnoClient.js           # Agno HTTP client
+        cache.js                # Redis cache
     package.json
-    .env (PORT=4000)
+    .env.example               
+    Dockerfile                  # Container definition
   frontend/
     src/
       App.jsx
@@ -149,7 +274,10 @@ TSP/
         SymbolDetails.jsx
       index.css
     vite.config.js
-    tailwind.config.js
-    postcss.config.js
+    Dockerfile                  # Container definition
     package.json
+  docker-compose.yml            # Full stack orchestration
+  test-agno-integration.ps1     # PowerShell test script
+  test-agno-integration.sh      # Bash test script
 ```
+

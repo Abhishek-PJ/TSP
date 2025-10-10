@@ -1,0 +1,61 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  agent:
+    build: ./agent
+    image: abhishekpj/tsp-agent:1.0.0
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build: ./backend
+    image: abhishekpj/tsp-backend:1.0.0
+    ports:
+      - "4000:4000"
+    depends_on:
+      agent:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - PORT=4000
+      - REDIS_URL=redis://redis:6379
+      - AGNO_URL=http://agent:8000
+      - AGNO_ENABLED=true
+      - AGNO_TIMEOUT_MS=15000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+   
+
+  frontend:
+    build: ./frontend
+    image: abhishekpj/tsp-frontend:1.0.0
+    ports:
+      - "5173:5173"
+    command: ["npm","run","dev","--","--host","0.0.0.0"]
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE=http://localhost:4000

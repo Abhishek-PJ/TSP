@@ -1,0 +1,11 @@
+FROM node:20-alpine
+WORKDIR /app
+
+# install curl for healthchecks
+RUN apk add --no-cache curl
+
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 4000
+CMD ["npm", "start"]

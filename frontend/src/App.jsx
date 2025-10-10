@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { AnimatePresence, motion } from 'framer-motion';
+import { useReactTable, getCoreRowModel, getSortedRowModel, flexRender } from '@tanstack/react-table';
 import Modal from './components/Modal.jsx';
 import CandlestickChart from './components/CandlestickChart.jsx';
 import './index.css';
@@ -13,12 +15,119 @@ function Badge({ text, variant = 'neutral' }) {
     watch: 'bg-amber-100 text-amber-800',
     bullish: 'bg-green-100 text-green-800',
     skip: 'bg-slate-100 text-slate-800',
+    neutral: 'bg-slate-100 text-slate-800',
   };
   return (
-    <span className={`inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full text-xs font-medium ${styles[variant] || 'bg-slate-100 text-slate-800'}`}>
+    <span className={`inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full text-xs font-medium ${styles[variant] || styles.neutral}`}>
       {String(text)}
     </span>
   );
+}
+
+/** Prediction pill used in table + sidebar */
+function PredictionBadge({ prediction }) {
+  if (!prediction) return null;
+
+  const confidence = Number(prediction.confidence ?? 0);
+  const trend = prediction.trend || 'sideways';
+  const target = Array.isArray(prediction.price_targets) && prediction.price_targets[0];
+  const pct = Number(prediction.predicted_change_pct ?? 0);
+
+  const trendStyles = {
+    bullish: 'text-green-700 bg-green-50 border-green-200',
+    bearish: 'text-red-700 bg-red-50 border-red-200',
+    sideways: 'text-slate-700 bg-slate-50 border-slate-200',
+  };
+  const emoji = trend === 'bullish' ? '📈' : trend === 'bearish' ? '📉' : '➡️';
+  const confColor = confidence > 0.75 ? 'text-green-700' : confidence > 0.5 ? 'text-amber-700' : 'text-red-700';
+
+  return (
+    <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-lg border text-xs ${trendStyles[trend]}`}>
+      <div className="flex items-center gap-1">
+        <span>{emoji}</span>
+        <span className="font-semibold">
+          {pct > 0 ? '+' : ''}{pct.toFixed(2)}%
+        </span>
+      </div>
+      {Number.isFinite(target) && (
+        <div className="text-xs text-slate-700">
+          → ₹{Number(target).toFixed(0)}
+        </div>
+      )}
+      <div className={`text-[11px] ${confColor}`}>{Math.round(confidence * 100)}%</div>
+    </div>
+  );
+}
+
+/** AI analysis card (reason/risk/volatility) */
+function EnhancedReasoning({ reasoning, prediction }) {
+  if (!reasoning && !prediction) return null;
+  const risk = prediction?.risk_level || '—';
+  const vol = prediction?.volatility != null ? `${Math.round(prediction.volatility * 100)}%` : '—';
+
+  return (
+    <div className="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-200">
+      <div className="text-xs font-semibold text-slate-700">AI Analysis</div>
+      {reasoning && <div className="mt-1 text-sm text-slate-700">{reasoning}</div>}
+      {prediction && (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <span className="text-slate-500">Risk:</span>{' '}
+            <span className={`font-semibold ${
+              risk === 'low' ? 'text-green-700' : risk === 'medium' ? 'text-amber-700' : 'text-red-700'
+            }`}>{String(risk).toUpperCase()}</span>
+          </div>
+          <div>
+            <span className="text-slate-500">Volatility:</span>{' '}
+            <span className="font-semibold">{vol}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** --- NEW: Client-side fallback prediction if backend didn't provide one --- */
+function derivePrediction(row) {
+  // Inputs we already have on each row
+  const pct = Number(row.pct_change ?? 0);
+  const ltp = Number(row.ltp ?? 0);
+
+  // Map your labels into a directional bias (in percentage points)
+  const label = (row.sentiment_label || row.recommendation || '').toUpperCase();
+  let bias = 0; // percentage points
+  if (label === 'BULLISH') bias = 0.7;            // tilt upward ~ +0.7%
+  else if (label === 'WATCH') bias = 0.2;         // small upside
+  else if (label === 'SKIP') bias = -0.6;         // tilt down
+
+  // Smooth current move into the prediction but keep it bounded
+  const baseMove = Math.max(-3, Math.min(3, pct)); // clamp current move to [-3, 3]
+  const predicted_change_pct = Number((baseMove * 0.4 + bias).toFixed(2));
+
+  const trend = predicted_change_pct > 0.3 ? 'bullish'
+               : predicted_change_pct < -0.3 ? 'bearish'
+               : 'sideways';
+
+  // Build a simple confidence heuristic
+  const confidence = Math.max(0.3, Math.min(0.9,
+    0.5 + (Math.abs(bias) / 1.2) + (Math.abs(baseMove) / 20)
+  ));
+
+  // Risk/volatility quick proxy
+  const risk_level = trend === 'bullish' ? 'low' : trend === 'sideways' ? 'medium' : 'high';
+  const volatility = Math.max(0, Math.min(1, (Number(row.volume || 0) / 2_000_000)));
+
+  // One-step target from LTP
+  const target = Number.isFinite(ltp) ? ltp * (1 + predicted_change_pct / 100) : null;
+
+  return {
+    predicted_change_pct,
+    confidence,
+    trend,
+    risk_level,
+    volatility,
+    price_targets: Number.isFinite(target) ? [target] : [],
+  };
 }
 
 function App() {
@@ -28,91 +137,298 @@ function App() {
   const [asOf, setAsOf] = useState('');
   const [marketOpen, setMarketOpen] = useState(true);
   const [sessionDate, setSessionDate] = useState('');
-  const [health, setHealth] = useState({ redis: false });
+  const [totalCandidates, setTotalCandidates] = useState(0);
 
   const [chartOpen, setChartOpen] = useState(false);
   const [chartSymbol, setChartSymbol] = useState('');
+  const [selectedRow, setSelectedRow] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState('');
   const [newsArticles, setNewsArticles] = useState([]);
 
-  // Select a symbol for the right sidebar (mini chart + news)
-  function selectSymbol(sym) {
-    setChartSymbol(sym);
-    setSidebarOpen(true);
-  }
-  // Open the modal with the currently selected symbol
-  function openChartModal() {
-    if (chartSymbol) setChartOpen(true);
-  }
-  function closeChart() {
-    setChartOpen(false);
-  }
-  function closeSidebar() {
-    setSidebarOpen(false);
-    setChartSymbol('');
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Read persisted sort on first render only
+  const initialPersist = useMemo(() => {
+    let fromLS = {};
+    try { fromLS = JSON.parse(localStorage.getItem('tsp_ui_state') || '{}'); } catch {}
+    const sp = Object.fromEntries(searchParams.entries());
+    return {
+      sortKey: String(sp.sortKey ?? fromLS.sortKey ?? 'pct_change'),
+      sortDir: String(sp.sortDir ?? fromLS.sortDir ?? 'desc'),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [sortKey, setSortKey] = useState(initialPersist.sortKey);
+  const [sortDir, setSortDir] = useState(initialPersist.sortDir);
+  const [sorting, setSorting] = useState(() => [{ id: initialPersist.sortKey, desc: initialPersist.sortDir === 'desc' }]);
+
+  const [columnVisibility, setColumnVisibility] = useState({
+    symbol: true,
+    pct_change: true,
+    open: true,
+    ltp: true,
+    volume: true,
+    prediction: true,
+  });
+
+  const [showBull, setShowBull] = useState(true);
+  const [showWatch, setShowWatch] = useState(true);
+  const [showSkip, setShowSkip] = useState(true);
+  const allChecked = showBull && showWatch && showSkip;
+
+  function toggleAll(next) {
+    setShowBull(next);
+    setShowWatch(next);
+    setShowSkip(next);
+    setColumnVisibility({
+      symbol: next,
+      pct_change: next,
+      open: next,
+      ltp: next,
+      volume: next,
+      prediction: next,
+    });
   }
 
-  const sorted = useMemo(() => {
-    return [...picks].sort((a, b) => b.pct_change - a.pct_change);
+  useEffect(() => {
+    const state = { sortKey, sortDir };
+    try { localStorage.setItem('tsp_ui_state', JSON.stringify(state)); } catch {}
+    setSearchParams(state, { replace: true });
+  }, [sortKey, sortDir, setSearchParams]);
+
+  useEffect(() => {
+    setSorting([{ id: sortKey, desc: sortDir === 'desc' }]);
+  }, [sortKey, sortDir]);
+
+  const onSortingChange = useCallback((updater) => {
+    setSorting((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      const first = next?.[0];
+      if (first?.id) {
+        setSortKey(first.id);
+        setSortDir(first.desc ? 'desc' : 'asc');
+      }
+      return next;
+    });
+  }, []);
+
+  const selectSymbol = useCallback((sym) => {
+    setChartSymbol(sym);
+    setSelectedRow((prev) => {
+      const r = picks.find(p => p.symbol === sym);
+      return r || null;
+    });
+    setSidebarOpen(true);
   }, [picks]);
+
+  const openChartModal = useCallback(() => { if (chartSymbol) setChartOpen(true); }, [chartSymbol]);
+  const closeChart = useCallback(() => setChartOpen(false), []);
+  const closeSidebar = useCallback(() => { setSidebarOpen(false); setChartSymbol(''); setSelectedRow(null); }, []);
+
+  const columns = useMemo(() => [
+    {
+      header: 'Symbol',
+      accessorKey: 'symbol',
+      size: 80,
+      cell: ({ row }) => (
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+          type="button"
+          onClick={() => selectSymbol(row.original.symbol)}
+          className="text-blue-600 hover:text-blue-800 font-semibold bg-transparent border-0 p-0 cursor-pointer"
+        >
+          {row.original.symbol}
+        </motion.button>
+      ),
+      sortingFn: 'alphanumeric',
+    },
+    {
+      header: 'Change',
+      accessorKey: 'pct_change',
+      size: 70,
+      cell: ({ row }) => (
+        <Badge
+          text={`${row.original.pct_change >= 0 ? '+' : ''}${row.original.pct_change.toFixed(2)}%`}
+          variant={row.original.pct_change >= 0 ? 'positive' : 'negative'}
+        />
+      ),
+      sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
+    },
+    {
+      header: 'Open',
+      accessorKey: 'open',
+      size: 80,
+      cell: ({ row }) => <span className="font-mono">{`₹${row.original.open.toFixed(2)}`}</span>,
+      sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
+    },
+    {
+      header: 'LTP',
+      accessorKey: 'ltp',
+      size: 80,
+      cell: ({ row }) => <span className="font-mono">{`₹${row.original.ltp.toFixed(2)}`}</span>,
+      sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
+    },
+    {
+      header: 'Volume',
+      accessorKey: 'volume',
+      size: 100,
+      cell: ({ row }) => <span className="font-mono">{row.original.volume.toLocaleString()}</span>,
+      sortingFn: (a, b, columnId) => a.getValue(columnId) - b.getValue(columnId),
+    },
+    {
+      header: 'Prediction',
+      accessorKey: 'prediction',
+      size: 160,
+      cell: ({ row }) => <PredictionBadge prediction={row.original.prediction} />,
+      sortingFn: (a, b, columnId) => {
+        const aVal = a.getValue(columnId)?.confidence ?? 0;
+        const bVal = b.getValue(columnId)?.confidence ?? 0;
+        return aVal - bVal;
+      },
+    },
+  ], [selectSymbol]);
+
+
+function DataTable({ data, highlight, hoverBg, borderColor }) {
+  const table = useReactTable({
+    data,
+    columns,
+    state: { sorting, columnVisibility },
+    onSortingChange,
+    onColumnVisibilityChange: setColumnVisibility,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  return (
+    <table className="w-full table-fixed text-left">
+      <thead>
+        {table.getHeaderGroups().map((hg) => (
+          <tr key={hg.id} className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
+            {hg.headers.map((header) => {
+              const sorted = header.column.getIsSorted();
+              return (
+                <th key={header.id} className="px-4 py-3 text-center font-semibold">
+                  {header.isPlaceholder ? null : (
+                    <button
+                      type="button"
+                      className="font-semibold hover:underline inline-flex items-center justify-center gap-1 w-full"
+                      onClick={header.column.getToggleSortingHandler()}
+                    >
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                      {sorted === 'asc' && <span>↑</span>}
+                      {sorted === 'desc' && <span>↓</span>}
+                    </button>
+                  )}
+                </th>
+              );
+            })}
+          </tr>
+        ))}
+      </thead>
+      <tbody className="text-sm">
+        <AnimatePresence initial={false}>
+          {table.getRowModel().rows.map((row) => (
+            <motion.tr
+              key={row.id}
+              layout
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18 }}
+              className={`border-t border-slate-200 transition-colors border-l-4 ${
+                row.original.symbol === chartSymbol
+                  ? `${highlight} ${borderColor}`
+                  : `border-transparent ${hoverBg}`
+              }`}
+            >
+              {row.getVisibleCells().map((cell) => (
+                <td key={cell.id} className="px-4 py-3 text-slate-800 text-center">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </motion.tr>
+          ))}
+        </AnimatePresence>
+
+        {table.getRowModel().rows.length === 0 && (
+          <tr>
+            <td colSpan={columns.length} className="px-4 py-3 text-slate-500 text-center">
+              No data.
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+
+  const sortedForBuckets = useMemo(
+    () => [...picks].sort((a, b) => b.pct_change - a.pct_change),
+    [picks]
+  );
 
   const grouped = useMemo(() => {
     const bull = [];
     const watch = [];
     const skip = [];
-    for (const r of sorted) {
+    for (const r of sortedForBuckets) {
       if (r.recommendation === 'BULLISH') bull.push(r);
       else if (r.recommendation === 'SKIP') skip.push(r);
       else watch.push(r);
     }
-    return { bull, watch, skip };
-  }, [sorted]);
+    return {
+      bull: bull.slice(0, 5),
+      watch: watch.slice(0, 5),
+      skip: skip.slice(0, 5),
+    };
+  }, [sortedForBuckets]);
 
-  async function fetchPicks() {
+  // Fetch picks + attach fallback predictions when missing
+  const fetchPicks = useCallback(async () => {
     try {
       setLoading(true);
       setError('');
       const res = await fetch(`${API_BASE}/api/picks/today`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+
+      const rows = Array.isArray(data.results) ? data.results : [];
+      const withPrediction = rows.map((r) => {
+        if (r && r.prediction) return r;
+        return { ...r, prediction: derivePrediction(r) };
+      });
+
       setAsOf(data.asOf);
       setMarketOpen(data.marketOpen !== false);
       setSessionDate(data.sessionDate || '');
-      setPicks(data.results || []);
+      setTotalCandidates(data.totalCandidates || 0);
+      setPicks(withPrediction);
+
+      if (sidebarOpen && chartSymbol) {
+        const fresh = withPrediction.find(p => p.symbol === chartSymbol);
+        setSelectedRow(fresh || null);
+      }
     } catch (e) {
       setError(e.message || 'Failed to load picks');
     } finally {
       setLoading(false);
     }
-  }
+  }, [sidebarOpen, chartSymbol]);
 
   useEffect(() => {
     fetchPicks();
-    const id = setInterval(fetchPicks, 30_000);
+    const id = setInterval(fetchPicks, 300_000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchPicks]);
 
-  // Load health status
-  useEffect(() => {
-    async function loadHealth() {
-      try {
-        const res = await fetch(`${API_BASE}/health`);
-        if (res.ok) {
-          const data = await res.json();
-          setHealth({ redis: !!data.redis });
-        }
-      } catch {}
-    }
-    loadHealth();
-    const id = setInterval(loadHealth, 60_000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Load news for the selected chart symbol to show in sidebar
+  // News for sidebar
   useEffect(() => {
     if (!chartSymbol) { setNewsArticles([]); setNewsError(''); return; }
     let abort = false;
@@ -134,8 +450,34 @@ function App() {
     return () => { abort = true; };
   }, [chartSymbol]);
 
+  // Date helpers
+  function formatDateDMY(v) {
+    if (!v) return '';
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      const [y, m, d] = v.split('-');
+      return `${d}-${m}-${y}`;
+    }
+    const d = new Date(v);
+    if (isNaN(d)) return String(v);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${dd}-${mm}-${yyyy}`;
+  }
+  function formatDateTimeDMY(v) {
+    if (!v) return '';
+    const d = new Date(v);
+    if (isNaN(d)) return String(v);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}-${mm}-${yyyy} ${hh}:${min}`;
+  }
+
   return (
-    <div className="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+    <div className="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen">
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm">
         <div className="w-full px-6 lg:px-10 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -145,32 +487,34 @@ function App() {
               </svg>
             </div>
             <div>
-              <div className="text-xl font-extrabold tracking-tight text-slate-900">Trendy Stocks Predictor </div>
+              <div className="text-xl font-bold tracking-tight text-slate-900">Trendy Stocks Predictor </div>
               <div className="text-sm text-slate-600">AI-Powered Trend Prediction Platform</div>
             </div>
           </div>
-          <div className="flex items-center gap-4">
-            <button onClick={fetchPicks} disabled={loading} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 font-bold text-sm text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.98] shadow-md disabled:opacity-60">
+          <div className="flex items-center gap-3 flex-wrap">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={fetchPicks}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-xl px-4 py-2 font-bold text-sm text-white bg-blue-600 hover:bg-blue-700 shadow-md disabled:opacity-60"
+            >
               {loading ? 'Updating…' : 'Refresh Data'}
-            </button>
+            </motion.button>
             {asOf && (
               <div className="text-right">
                 <div className="text-[11px] font-bold text-slate-800">Last Updated</div>
-                <div className="text-xs text-slate-600">{new Date(asOf).toLocaleTimeString()}</div>
+                <div className="text-xs text-slate-600">{formatDateTimeDMY(asOf)}</div>
               </div>
             )}
-            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${health.redis ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
-              <span style={{width:8, height:8, borderRadius:999, background: health.redis ? '#10b981' : '#ef4444'}} />
-              Redis {health.redis ? 'Connected' : 'Disconnected'}
-            </span>
           </div>
         </div>
       </header>
 
       <main className="w-full px-6 lg:px-10 py-6">
         {!marketOpen && (
-          <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 mb-4">
-            Market Closed — Showing last session's picks{sessionDate ? ` (${sessionDate})` : ''}.
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 mb-4 text-center">
+            Market Closed — Showing last session&apos;s picks{sessionDate ? ` (${formatDateDMY(sessionDate)})` : ''}.
           </div>
         )}
         {error && (
@@ -179,23 +523,32 @@ function App() {
 
         {/* Top summary bar */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-          <div className="bg-emerald-50 rounded-xl border border-slate-200 shadow-sm p-4">
+          <div className="bg-emerald-50 rounded-xl border border-slate-200 shadow-sm p-4 text-center">
             <div className="text-xs font-semibold text-emerald-700 tracking-wide">Bullish</div>
             <div className="mt-1 text-sm font-extrabold text-slate-900">{grouped.bull.length}</div>
           </div>
-          <div className="bg-amber-50 rounded-xl border border-slate-200 shadow-sm p-4">
+          <div className="bg-amber-50 rounded-xl border border-slate-200 shadow-sm p-4 text-center">
             <div className="text-xs font-semibold text-amber-700 tracking-wide">Watch</div>
             <div className="mt-1 text-sm font-extrabold text-slate-900">{grouped.watch.length}</div>
           </div>
-          <div className="bg-rose-50 rounded-xl border border-slate-200 shadow-sm p-4">
+          <div className="bg-rose-50 rounded-xl border border-slate-200 shadow-sm p-4 text-center">
             <div className="text-xs font-semibold text-rose-700 tracking-wide">Skip</div>
             <div className="mt-1 text-sm font-extrabold text-slate-900">{grouped.skip.length}</div>
           </div>
-          <div className="bg-slate-50 rounded-xl border border-slate-200 shadow-sm p-4">
+          <div className="bg-slate-50 rounded-xl border border-slate-200 shadow-sm p-4 text-center">
             <div className="text-xs font-semibold text-slate-700 tracking-wide">Total</div>
-            <div className="mt-1 text-sm font-extrabold text-slate-900">{sorted.length}</div>
+            <div className="mt-1 text-sm font-extrabold text-slate-900">{grouped.bull.length + grouped.watch.length + grouped.skip.length}</div>
           </div>
         </div>
+
+        {/* Optimization info */}
+        {totalCandidates > 0 && (
+          <div className="bg-blue-50 border border-blue-200 text-blue-800 rounded-xl p-3 mb-4">
+            <div className="text-xs font-medium">
+              ⚡ Performance Optimized: Analyzed top 50 stocks to find the best 5 per category from {totalCandidates} total candidates
+            </div>
+          </div>
+        )}
 
         {/* Split grid: left tables, right animated sidebar */}
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -204,11 +557,34 @@ function App() {
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="border-b border-slate-200 px-6 py-4 flex items-center justify-between">
                 <div>
-                  <div className="text-lg font-bold text-slate-900">Today's Market Picks</div>
-                  <div className="text-sm text-slate-600">AI-curated investment opportunities</div>
+                  <div className="text-lg font-bold text-slate-900">Today&apos;s Market Picks</div>
+                  <div className="text-sm text-slate-600">AI-curated investment opportunities with intraday prediction</div>
                 </div>
                 {loading && <div className="text-sm text-slate-600">Loading…</div>}
               </div>
+
+              {/* Category filters */}
+              <div className="border-b border-slate-200 bg-slate-50/50 px-6 py-3">
+                <div className="flex flex-wrap items-center gap-6 text-sm text-slate-700">
+                  <label className="inline-flex items-center gap-2">
+                    <input type="checkbox" className="accent-blue-600" checked={allChecked} onChange={(e)=>toggleAll(e.target.checked)} />
+                    <span className="font-semibold">All</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input type="checkbox" className="accent-emerald-600" checked={showBull} onChange={(e)=>setShowBull(e.target.checked)} />
+                    <span>Bullish</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input type="checkbox" className="accent-amber-600" checked={showWatch} onChange={(e)=>setShowWatch(e.target.checked)} />
+                    <span>Watch</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input type="checkbox" className="accent-rose-600" checked={showSkip} onChange={(e)=>setShowSkip(e.target.checked)} />
+                    <span>Skip</span>
+                  </label>
+                </div>
+              </div>
+
               <div>
                 {loading && (
                   <div className="p-5">
@@ -219,223 +595,211 @@ function App() {
                     ))}
                   </div>
                 )}
-                {!loading && sorted.length === 0 && (
+
+                {!loading && sortedForBuckets.length === 0 && (
                   <div className="p-6 text-sm text-slate-600">No candidates yet. Try refresh.</div>
                 )}
 
-                {!loading && sorted.length > 0 && (
+                {!loading && sortedForBuckets.length > 0 && (
                   <div className="grid gap-4 p-4">
+                    {/* Column visibility toggles */}
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3 }}
+                      className="flex flex-wrap items-center gap-4 text-sm text-slate-700"
+                    >
+                      <span className="text-xs font-semibold text-slate-600">Columns:</span>
+                      {[
+                        { key: 'symbol', label: 'Symbol' },
+                        { key: 'pct_change', label: 'Change' },
+                        { key: 'open', label: 'Open' },
+                        { key: 'ltp', label: 'LTP' },
+                        { key: 'volume', label: 'Volume' },
+                        { key: 'prediction', label: 'Prediction' },
+                      ].map((c) => (
+                        <label key={c.key} className="inline-flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            className="accent-blue-600"
+                            checked={columnVisibility[c.key] !== false}
+                            onChange={(e) => setColumnVisibility((prev) => ({ ...prev, [c.key]: e.target.checked }))}
+                          />
+                          <span>{c.label}</span>
+                        </label>
+                      ))}
+                    </motion.div>
+
                     {/* Bullish Table */}
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-l-4 border-emerald-500 px-6 py-4 pl-5 flex items-center justify-between">
-                        <div>
-                          <div className="text-lg font-bold text-slate-900">Bullish</div>
-                          <div className="text-xs tracking-wide text-slate-600">Strong positive sentiment and metrics</div>
+                    {showBull && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: 0.1 }}
+                        className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                      >
+                        <div className="bg-white border-b border-l-4 border-emerald-500 px-6 py-4 pl-5 flex items-center justify-between">
+                          <div>
+                            <div className="text-lg font-bold text-slate-900">Bullish</div>
+                            <div className="text-xs tracking-wide text-slate-600">Top 5 stocks with strong positive sentiment</div>
+                          </div>
+                          <Badge text={`${grouped.bull.length} picks`} variant="bullish" />
                         </div>
-                        <Badge text={`${grouped.bull.length} picks`} variant="bullish" />
-                      </div>
-                      <div className="relative max-h-[60vh] overflow-auto">
-                        <table className="w-full border-separate border-spacing-0 text-left">
-                          <thead>
-                            <tr className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
-                              <th className="px-4 py-3">Symbol</th>
-                              <th className="px-4 py-3">Change</th>
-                              <th className="px-4 py-3">Open</th>
-                              <th className="px-4 py-3">LTP</th>
-                              <th className="px-4 py-3">Volume</th>
-                            </tr>
-                          </thead>
-                          <tbody className="text-sm">
-                            {grouped.bull.map((row) => (
-                              <tr
-                                key={row.symbol}
-                                className={`border-t border-slate-200 transition-colors border-l-4 ${row.symbol === chartSymbol ? 'bg-emerald-100 border-emerald-500' : 'border-transparent hover:bg-emerald-50'}`}
-                              >
-                                <td className="px-4 py-3">
-                                  <button type="button" onClick={() => selectSymbol(row.symbol)} className="text-blue-600 hover:text-blue-800 font-semibold bg-transparent border-0 p-0 cursor-pointer">
-                                    {row.symbol}
-                                  </button>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <Badge text={`${row.pct_change >= 0 ? '+' : ''}${row.pct_change.toFixed(2)}%`} variant={row.pct_change >= 0 ? 'positive' : 'negative'} />
-                                </td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.open.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.ltp.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">{row.volume.toLocaleString()}</td>
-                              </tr>
-                            ))}
-                            {grouped.bull.length === 0 && (
-                              <tr><td colSpan={5} className="px-4 py-3 text-slate-500">No bullish picks.</td></tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
+                        <div className="relative max-h-[60vh] overflow-auto">
+                          <DataTable
+                            data={grouped.bull}
+                            highlight="bg-emerald-100"
+                            hoverBg="hover:bg-emerald-50"
+                            borderColor="border-emerald-500"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
 
                     {/* Watch Table */}
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-l-4 border-amber-500 px-6 py-4 pl-5 flex items-center justify-between">
-                        <div>
-                          <div className="text-lg font-bold text-slate-900">Watch</div>
-                          <div className="text-xs tracking-wide text-slate-600">Meets some criteria; monitor closely</div>
+                    {showWatch && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: showBull ? 0.5 : 0.1 }}
+                        className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                      >
+                        <div className="bg-white border-b border-l-4 border-amber-500 px-6 py-4 pl-5 flex items-center justify-between">
+                          <div>
+                            <div className="text-lg font-bold text-slate-900">Watch</div>
+                            <div className="text-xs tracking-wide text-slate-600">Top 5 stocks meeting some criteria</div>
+                          </div>
+                          <Badge text={`${grouped.watch.length} picks`} variant="watch" />
                         </div>
-                        <Badge text={`${grouped.watch.length} picks`} variant="watch" />
-                      </div>
-                      <div className="relative max-h-[60vh] overflow-auto">
-                        <table className="w-full border-separate border-spacing-0 text-left">
-                          <thead>
-                            <tr className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
-                              <th className="px-4 py-3">Symbol</th>
-                              <th className="px-4 py-3">Change</th>
-                              <th className="px-4 py-3">Open</th>
-                              <th className="px-4 py-3">LTP</th>
-                              <th className="px-4 py-3">Volume</th>
-                            </tr>
-                          </thead>
-                          <tbody className="text-sm">
-                            {grouped.watch.map((row) => (
-                              <tr
-                                key={row.symbol}
-                                className={`border-t border-slate-200 transition-colors border-l-4 ${row.symbol === chartSymbol ? 'bg-amber-100 border-amber-500' : 'border-transparent hover:bg-amber-50'}`}
-                              >
-                                <td className="px-4 py-3">
-                                  <button type="button" onClick={() => selectSymbol(row.symbol)} className="text-blue-600 hover:text-blue-800 font-semibold bg-transparent border-0 p-0 cursor-pointer">
-                                    {row.symbol}
-                                  </button>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <Badge text={`${row.pct_change >= 0 ? '+' : ''}${row.pct_change.toFixed(2)}%`} variant={row.pct_change >= 0 ? 'positive' : 'negative'} />
-                                </td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.open.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.ltp.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">{row.volume.toLocaleString()}</td>
-                              </tr>
-                            ))}
-                            {grouped.watch.length === 0 && (
-                              <tr><td colSpan={5} className="px-4 py-3 text-slate-500">No watchlist picks.</td></tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
+                        <div className="relative max-h-[60vh] overflow-auto">
+                          <DataTable
+                            data={grouped.watch}
+                            highlight="bg-amber-100"
+                            hoverBg="hover:bg-amber-50"
+                            borderColor="border-amber-500"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
 
                     {/* Skip Table */}
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-                      <div className="bg-white border-b border-l-4 border-rose-500 px-6 py-4 pl-5 flex items-center justify-between">
-                        <div>
-                          <div className="text-lg font-bold text-slate-900">Skip</div>
-                          <div className="text-xs tracking-wide text-slate-600">Fails numeric/sentiment checks</div>
+                    {showSkip && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.4, delay: (showBull && showWatch) ? 0.9 : (showBull || showWatch) ? 0.5 : 0.1 }}
+                        className="bg-white rounded-xl border border-slate-200 shadow-sm"
+                      >
+                        <div className="bg-white border-b border-l-4 border-rose-500 px-6 py-4 pl-5 flex items-center justify-between">
+                          <div>
+                            <div className="text-lg font-bold text-slate-900">Skip</div>
+                            <div className="text-xs tracking-wide text-slate-600">Top 5 stocks failing criteria</div>
+                          </div>
+                          <Badge text={`${grouped.skip.length} picks`} variant="skip" />
                         </div>
-                        <Badge text={`${grouped.skip.length} picks`} variant="skip" />
-                      </div>
-                      <div className="relative max-h-[60vh] overflow-auto">
-                        <table className="w-full border-separate border-spacing-0 text-left">
-                          <thead>
-                            <tr className="text-slate-700 text-xs sticky top-0 bg-slate-50 z-10">
-                              <th className="px-4 py-3">Symbol</th>
-                              <th className="px-4 py-3">Change</th>
-                              <th className="px-4 py-3">Open</th>
-                              <th className="px-4 py-3">LTP</th>
-                              <th className="px-4 py-3">Volume</th>
-                            </tr>
-                          </thead>
-                          <tbody className="text-sm">
-                            {grouped.skip.map((row) => (
-                              <tr
-                                key={row.symbol}
-                                className={`border-t border-slate-200 transition-colors border-l-4 ${row.symbol === chartSymbol ? 'bg-rose-100 border-rose-500' : 'border-transparent hover:bg-rose-50'}`}
-                              >
-                                <td className="px-4 py-3">
-                                  <button type="button" onClick={() => selectSymbol(row.symbol)} className="text-blue-600 hover:text-blue-800 font-semibold bg-transparent border-0 p-0 cursor-pointer">
-                                    {row.symbol}
-                                  </button>
-                                </td>
-                                <td className="px-4 py-3">
-                                  <Badge text={`${row.pct_change >= 0 ? '+' : ''}${row.pct_change.toFixed(2)}%`} variant={row.pct_change >= 0 ? 'positive' : 'negative'} />
-                                </td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.open.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">₹{row.ltp.toFixed(2)}</td>
-                                <td className="px-4 py-3 text-slate-900">{row.volume.toLocaleString()}</td>
-                              </tr>
-                            ))}
-                            {grouped.skip.length === 0 && (
-                              <tr><td colSpan={5} className="px-4 py-3 text-slate-500">No symbols to skip.</td></tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
+                        <div className="relative max-h-[60vh] overflow-auto">
+                          <DataTable
+                            data={grouped.skip}
+                            highlight="bg-rose-100"
+                            hoverBg="hover:bg-rose-50"
+                            borderColor="border-rose-500"
+                          />
+                        </div>
+                      </motion.div>
+                    )}
                   </div>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Right sidebar: Live Chart and Latest News (animated) */}
-          <aside
-            className={
-              `grid gap-4 h-fit self-start sticky top-6 z-0 max-h-[calc(100vh-6rem)] overflow-auto transform transition-all duration-300 ease-out ` +
-              (sidebarOpen ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-6 pointer-events-none')
-            }
-          >
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-              <div className="border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-                <div>
-                  <div className="text-lg font-bold text-slate-900">Live Chart</div>
-                  <div className="text-sm text-slate-600">{chartSymbol ? chartSymbol : 'Pick a symbol'}</div>
-                </div>
-                {sidebarOpen && (
-                  <button
-                    type="button"
-                    onClick={closeSidebar}
-                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-                    title="Close sidebar"
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-              <div className="p-4" style={{ minHeight: 300 }}>
-                {chartSymbol ? (
-                  <button type="button" onClick={openChartModal} title="Open full chart" className="block w-full h-[360px] cursor-pointer bg-transparent p-0 border-0">
-                    <div className="w-full h-full">
-                      <CandlestickChart symbol={chartSymbol} />
+          {/* Right sidebar: Live Chart + News + AI Analysis */}
+          <AnimatePresence>
+            {sidebarOpen && (
+              <motion.aside
+                initial={{ opacity: 0, x: 24 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 24 }}
+                transition={{ duration: 0.2, ease: 'easeOut' }}
+                className="grid gap-4 h-fit self-start sticky top-6 z-0 max-h-[calc(100vh-6rem)] overflow-auto"
+              >
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+                  <div className="border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+                    <div>
+                      <div className="text-lg font-bold text-slate-900">Live Chart</div>
+                      <div className="text-sm text-slate-600">{chartSymbol ? chartSymbol : 'Pick a symbol'}</div>
                     </div>
-                  </button>
-                ) : (
-                  <div className="text-sm text-slate-600">Click a symbol to preview its chart here.</div>
-                )}
-              </div>
-            </div>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      type="button"
+                      onClick={closeSidebar}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+                      title="Close sidebar"
+                    >
+                      ✕
+                    </motion.button>
+                  </div>
+                  <div className="p-4" style={{ minHeight: 300 }}>
+                    {chartSymbol ? (
+                      <button type="button" onClick={openChartModal} title="Open full chart" className="block w-full h-[360px] cursor-pointer bg-transparent border-0 p-0">
+                        <div className="w-full h-full">
+                          <CandlestickChart symbol={chartSymbol} />
+                        </div>
+                      </button>
+                    ) : (
+                      <div className="text-sm text-slate-600">Click a symbol to preview its chart here.</div>
+                    )}
+                  </div>
+                </div>
 
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
-              <div className="border-b border-slate-200 px-6 py-4">
-                <div>
-                  <div className="text-lg font-bold text-slate-900">Latest News</div>
-                  <div className="text-sm text-slate-600">{chartSymbol ? chartSymbol : 'Pick a symbol'}</div>
-                </div>
-              </div>
-              <div className="p-4">
-                {!chartSymbol && <div className="text-sm text-slate-600">Select a symbol to load recent news.</div>}
-                {chartSymbol && newsLoading && <div className="text-sm text-slate-600">Loading…</div>}
-                {chartSymbol && newsError && (
-                  <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3">{newsError}</div>
+                {/* AI Analysis card */}
+                {selectedRow && (
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-6 py-4">
+                    <div className="text-lg font-bold text-slate-900">AI Prediction</div>
+                    <div className="mt-2"><PredictionBadge prediction={selectedRow.prediction} /></div>
+                    <EnhancedReasoning reasoning={selectedRow.reason} prediction={selectedRow.prediction} />
+                  </div>
                 )}
-                {chartSymbol && !newsLoading && newsArticles.length === 0 && (
-                  <div className="text-sm text-slate-600">No recent articles.</div>
-                )}
-                <div className="grid gap-3">
-                  {newsArticles.slice(0, 6).map((a, idx) => (
-                    <a key={idx} href={a.url} target="_blank" rel="noreferrer" className="bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 p-3 text-slate-800 transition-colors">
-                      <div className="text-[11px] text-slate-500">{new Date(a.publishedAt).toLocaleString()}</div>
-                      <div className="mt-1 font-bold">{a.title}</div>
-                      {a.summary && <div className="mt-1 text-sm text-slate-700">{a.summary}</div>}
-                    </a>
-                  ))}
+
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
+                  <div className="border-b border-slate-200 px-6 py-4">
+                    <div>
+                      <div className="text-lg font-bold text-slate-900">Latest News</div>
+                      <div className="text-sm text-slate-600">{chartSymbol ? chartSymbol : 'Pick a symbol'}</div>
+                    </div>
+                  </div>
+                  <div className="p-4">
+                    {!chartSymbol && <div className="text-sm text-slate-600">Select a symbol to load recent news.</div>}
+                    {chartSymbol && newsLoading && <div className="text-sm text-slate-600">Loading…</div>}
+                    {chartSymbol && newsError && (
+                      <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-3">{newsError}</div>
+                    )}
+                    {chartSymbol && !newsLoading && newsArticles.length === 0 && (
+                      <div className="text-sm text-slate-600">No recent articles.</div>
+                    )}
+                    <div className="grid gap-3">
+                      {newsArticles.slice(0, 6).map((a, idx) => (
+                        <motion.a
+                          whileHover={{ scale: 1.01 }}
+                          whileTap={{ scale: 0.99 }}
+                          key={idx}
+                          href={a.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 p-3 text-slate-800 transition-colors"
+                        >
+                          <div className="text-[11px] text-slate-500">{formatDateTimeDMY(a.publishedAt)}</div>
+                          <div className="mt-1 font-bold">{a.title}</div>
+                          {a.summary && <div className="mt-1 text-sm text-slate-700">{a.summary}</div>}
+                        </motion.a>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          </aside>
+              </motion.aside>
+            )}
+          </AnimatePresence>
         </div>
 
         <Modal open={chartOpen} onClose={closeChart} title={`${chartSymbol} — Candlestick`}>
@@ -452,7 +816,7 @@ function App() {
       <footer className="border-t border-slate-200 bg-white">
         <div className="w-full px-6 lg:px-10 py-4">
           <div className="flex items-center justify-between text-sm text-slate-600">
-            <span> {new Date().getFullYear()} Trendy Stocks Predictor</span>
+            <span>{new Date().getFullYear()} Trendy Stocks Predictor</span>
             <a href="https://vitejs.dev" target="_blank" rel="noreferrer" className="text-blue-600 font-bold hover:text-blue-800"></a>
           </div>
         </div>
