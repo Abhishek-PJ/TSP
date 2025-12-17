@@ -10,7 +10,7 @@ let useRedis = false;
 
 
 function initRedis() {
-  const url = process.env.REDIS_URL;
+  const url = process.env.REDIS_URL  || "redis://localhost:6379";
 
   if (!url) {
     console.warn('REDIS_URL not found, using in-memory cache only.');
